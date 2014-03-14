@@ -44,7 +44,7 @@ def run_command(command, arg):
     def generator():
         while True:
             line = None
-            with gevent.Timeout(2, False):
+            with gevent.Timeout(SLAVE_HEARTBEAT_TTL, False):
                 line = slave.stdout.readline()
 
             if line is None:
