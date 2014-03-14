@@ -14,7 +14,7 @@ redis.connection.socket = gevent.socket
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--reddis-server', metavar='ENDPOINT', type=str,
+    parser.add_argument('--redis-server', metavar='ENDPOINT', type=str,
                         nargs='?', default='localhost')
     parser.add_argument('--flushdb', action='store_const', default=False,
                         const=True)
@@ -29,7 +29,7 @@ if __name__ == '__main__':
     if len(args.jobs) == 0:
         sys.exit(0)
 
-    job_defs = map(lambda s: re.match('(\w+):(\w+)', s).groups(), args.jobs)
+    job_defs = map(lambda s: re.match('(\w+)(?::(.*)$)?', s).groups(), args.jobs)
     job_ids = map(lambda j: job_queue.push(*j).job_id, job_defs)
     id_to_blob = {ji: job_defs[i][1] for (i, ji) in enumerate(job_ids)}
 
