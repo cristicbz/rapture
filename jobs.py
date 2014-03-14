@@ -11,8 +11,10 @@ FIELD_QUEUE_KEY = 'queue_id'
 FIELD_STATUS = 'status'
 FIELD_BLOB = 'blob'
 FIELD_PROGRESS = 'progress'
+FIELD_MESSAGE = 'message'
 FIELD_TIMESTAMP = 'timestamp'
 
+STATUS_LEN = 1
 STATUS_PENDING = 'P'
 STATUS_FAILED = 'F'
 STATUS_DONE = 'D'
@@ -20,7 +22,7 @@ STATUS_DONE = 'D'
 SCRIPT_CONSTANTS = {'f_status': FIELD_STATUS, 'f_queue_id': FIELD_QUEUE_KEY,
                     'f_blob': FIELD_BLOB, 'status_pending': STATUS_PENDING,
                     'status_done': STATUS_DONE, 'f_progress': FIELD_PROGRESS,
-                    'f_timestamp': FIELD_TIMESTAMP,
+                    'f_timestamp': FIELD_TIMESTAMP, 'f_message': FIELD_MESSAGE,
                     'status_failed': STATUS_FAILED}
 
 SCRIPT_NEW = """
@@ -38,7 +40,7 @@ return 1
 """ % SCRIPT_CONSTANTS
 
 SCRIPT_RESOLVE = """
-local data_key, inprogress_key, timestamp = KEYS[1], KEYS[2], ARGV[2]
+local data_key, inprogress_key, timestamp = KEYS[1], KEYS[2], ARGV[1]
 local rv = redis.call('hget', data_key, '%(f_status)s')
 if rv == nil then
     return {err='inexistent job'}
@@ -53,15 +55,17 @@ return 1
 """ % SCRIPT_CONSTANTS
 
 SCRIPT_FAIL = """
-local data_key, inprogress_key, timestamp = KEYS[1], KEYS[2], ARGV[2]
+local data_key, inprogress_key, message = KEYS[1], KEYS[2], ARGV[1]
 local rv = redis.call('hget', data_key, '%(f_status)s')
 if rv == nil then
     return {err='inexistent job'}
 elseif rv ~= '%(status_pending)s' then
     return 0
 end
-redis.call('hset', data_key, '%(f_status)s', '%(status_failed)s')
-redis.call('publish', data_key, '%(status_failed)s')
+redis.call('hmset', data_key,
+           '%(f_status)s', '%(status_failed)s',
+           '%(f_message)s', message)
+redis.call('publish', data_key, '%(status_failed)s' .. message)
 redis.call('lrem', inprogress_key, 1, data_key)
 return 1
 """ % SCRIPT_CONSTANTS
@@ -83,9 +87,9 @@ return 1
 
 
 JobSnapshot = namedtuple(
-    'JobSnapshot', 'job_id job_type status blob progress timestamp')
+    'JobSnapshot', 'job_id job_type status blob message progress timestamp')
 ProgressNotifcation = namedtuple('ProgressNotifcation',
-                                 'job_id status progress')
+                                 'job_id status message')
 
 
 class JobQueue(object):
@@ -120,12 +124,14 @@ class JobQueue(object):
 
     def fetch_snapshot(self, job_id):
         job_id = ensure_job_id(job_id)
-        (queue_id, status, blob, progress, timestamp) = self._redis.hmget(
-            id_to_data_key(job_id), FIELD_QUEUE_KEY, FIELD_STATUS, FIELD_BLOB,
-            FIELD_PROGRESS, FIELD_TIMESTAMP)
+        (queue_id, status, blob, message, progress, timestamp) = \
+            self._redis.hmget(
+                id_to_data_key(job_id),
+                FIELD_QUEUE_KEY, FIELD_STATUS, FIELD_BLOB,
+                FIELD_MESSAGE, FIELD_PROGRESS, FIELD_TIMESTAMP)
         assert queue_id
-        job = JobSnapshot(job_id, queue_key_to_type(queue_id), status, blob,
-                          progress, timestamp)
+        job = JobSnapshot(job_id, queue_key_to_type(queue_id), status,
+                          blob, message or '', progress or '', timestamp or 0)
         assert_valid_job(job)
         return job
 
@@ -153,12 +159,10 @@ class JobQueue(object):
                 job_id = data_key_to_id(channel)
                 assert valid_job_id(job_id)
                 if msgt == 'message':
-                    if data == STATUS_DONE or data == STATUS_FAILED:
+                    status, message = data[:STATUS_LEN], data[STATUS_LEN:]
+                    if status == STATUS_DONE or status == STATUS_FAILED:
                         pubsub.unsubscribe(channel)
-                        yield ProgressNotifcation(job_id, data, None)
-                    else:
-                        yield ProgressNotifcation(job_id, STATUS_PENDING,
-                                                  data[len(STATUS_PENDING):])
+                    yield ProgressNotifcation(job_id, status, message)
 
         return (generator, close)
 
@@ -167,9 +171,10 @@ class JobQueue(object):
         self._script_resolve(keys=[id_to_data_key(job_id), INPROGRESS_KEY],
                              args=[self.timestamp()])
 
-    def fail(self, job_id):
+    def fail(self, job_id, message):
         job_id = ensure_job_id(job_id)
-        self._script_fail(keys=[id_to_data_key(job_id), INPROGRESS_KEY])
+        self._script_fail(keys=[id_to_data_key(job_id), INPROGRESS_KEY],
+                          args=[message])
 
     def monitor_inprogress(self):
         key = self._redis.brpoplpush(INPROGRESS_KEY, INPROGRESS_KEY)
@@ -182,7 +187,7 @@ class JobQueue(object):
 
 def make_new_job(job_type, blob=''):
     job = JobSnapshot(base64.b64encode(os.urandom(18)), job_type,
-                      STATUS_PENDING, blob, None, None)
+                      STATUS_PENDING, blob, '', '', '0.0')
     assert_valid_job(job)
     return job
 
@@ -192,6 +197,16 @@ def assert_valid_job(job):
     assert valid_job_type(job.job_type)
     assert valid_blob(job.blob)
     assert valid_status(job.status)
+    assert valid_message(job.message)
+    assert valid_progress(job.progress)
+
+
+def valid_message(message):
+    return type(message) == str
+
+
+def valid_progress(progress):
+    return type(progress) == str
 
 
 def valid_job_type(job_type):
@@ -203,7 +218,7 @@ def valid_blob(blob):
 
 
 def valid_status(status):
-    return status in (STATUS_PENDING, STATUS_DONE)
+    return status in (STATUS_PENDING, STATUS_FAILED, STATUS_DONE)
 
 
 def valid_job_id(job_id):

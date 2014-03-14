@@ -1,4 +1,4 @@
-#!env python
+#!/usr/bin/env python
 
 import argparse
 import gevent
@@ -16,6 +16,8 @@ redis.connection.socket = gevent.socket
 
 SLAVE_SUCCESS = 0
 SLAVE_FAILURE = 1
+SLAVE_PROGRESS = 2
+SLAVE_HEARTBEAT_TTL = 4
 
 
 def info(message, *args):
@@ -30,40 +32,47 @@ def fatal(message, *args):
 def run_command(command, arg):
     line = command + [arg]
     try:
-        slave = gevent.subprocess.Popen(line, stdout=gevent.subprocess.PIPE)
+        slave = gevent.subprocess.Popen(line, stdout=gevent.subprocess.PIPE,
+                                        stderr=gevent.subprocess.PIPE)
     except OSError, e:
         def generator():
-            errmsg = 'popen failed \'%r\' - %s' % (line, e.message)
-            yield 'ERROR: %s:' % errmsg
-            yield SLAVE_FAILURE
+            errmsg = 'popen failed %r - %s' % (line, e.message)
+            yield SLAVE_FAILURE, 'ERROR: %s:' % errmsg
             fatal(errmsg)
-        return (lambda: None, generator)
+        return generator
 
     def generator():
-        last = ''
         while True:
-            line = slave.stdout.readline()
+            line = None
+            with gevent.Timeout(2, False):
+                line = slave.stdout.readline()
+
+            if line is None:
+                slave.kill()
+                yield SLAVE_FAILURE, \
+                    'ERROR task timed out; stderr:\n%s' % \
+                    slave.stderr.read()
+                return
+
             if line == '':
                 timed_out = False
                 with gevent.Timeout(1, False):
                     errc = slave.wait()
                     if errc == 0:
-                        yield SLAVE_SUCCESS
+                        yield SLAVE_SUCCESS, None
+                    elif errc < 0:
+                        yield SLAVE_FAILURE, 'ERROR signal %d; stderr:\n%s' % \
+                            (-errc, slave.stderr.read())
                     else:
-                        yield 'ERROR exit with %d:%s' % (errc, last)
-                        yield SLAVE_FAILURE
+                        yield SLAVE_FAILURE, \
+                            'ERROR exit with %d; stderr:\n%s' % \
+                            (errc, slave.stderr.read())
                 if timed_out:
                     slave.kill()
-                    #TODO(cristicbz): do this properly (i.e. add reason field
-                    #to jobs rather than using progress.
-                    yield 'ERROR interleaved timeout:' + last
-                    yield SLAVE_FAILURE
+                    yield SLAVE_FAILURE, 'ERROR: Interleaved timeout.'
                 return
-            last = line[:-1]
-            if len(last):
-                yield ':' + line[:-1]
-            else:
-                yield ''
+            yield SLAVE_PROGRESS, line[:-1]
+
     return generator
 
 
@@ -78,17 +87,16 @@ def worker(job_queue, job_type, command):
         job_meta = job_queue.fetch_snapshot(job_id)
         job_queue.publish_progress(job_id)
         info('worker: Started %s/%s.', job_type, job_id)
-        for progress in run_command(command, job_meta.blob)():
-            if progress == SLAVE_SUCCESS:
+        for msg, text in run_command(command, job_meta.blob)():
+            if msg == SLAVE_SUCCESS:
                 job_queue.resolve(job_id)
                 info('worker: Success %s/%s.', job_type, job_id)
-            elif progress == SLAVE_FAILURE:
-                job_queue.fail(job_id)
-                info('worker: Failure %s/%s.', job_type, job_id)
+            elif msg == SLAVE_FAILURE:
+                job_queue.fail(job_id, text)
+                info('worker: Failure %s/%s: %s', job_type, job_id, text)
             else:
-                job_queue.publish_progress(job_id, progress)
-                info('worker: Progress (%s) on %s/%s',
-                     progress, job_type, job_id)
+                job_queue.publish_progress(job_id, text)
+                info('worker: Progress %s/%s: %s', job_type, job_id, text)
 
 
 def signal_handler(job_queue, greenlets):

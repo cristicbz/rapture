@@ -1,3 +1,1 @@
-int main() {
-  (*(int*)0) = 0;
-}
+int main() { *((int*)0) = 0; }
