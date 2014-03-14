@@ -54,11 +54,16 @@ def run_command(command, arg):
                         yield SLAVE_FAILURE
                 if timed_out:
                     slave.kill()
+                    #TODO(cristicbz): do this properly (i.e. add reason field
+                    #to jobs rather than using progress.
                     yield 'ERROR interleaved timeout:' + last
                     yield SLAVE_FAILURE
                 return
             last = line[:-1]
-            yield ':' + line[:-1]
+            if len(last):
+                yield ':' + line[:-1]
+            else:
+                yield ''
     return generator
 
 
