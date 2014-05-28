@@ -1,8 +1,9 @@
 import base64
+from collections import namedtuple
 import os
+
 import redis
 
-from collections import namedtuple
 
 INPROGRESS_KEY = 'jobs:inprogress'
 DATA_KEY_PREFIX = 'jobs:data:'

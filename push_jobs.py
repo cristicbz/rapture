@@ -1,16 +1,19 @@
 #!env python
-
 import argparse
-import gevent
-import gevent.socket
-import jobs
 import re
-import redis.connection
 import signal
 import sys
 
+import gevent
+import gevent.socket
+import redis.connection
+
+from reinferio import jobs
+
+
 # Patch redis connections to use gevent sockets.
 redis.connection.socket = gevent.socket
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -22,7 +25,7 @@ if __name__ == '__main__':
         'jobs', metavar='JOBTYPE:DATA', type=str, nargs='*')
     args = parser.parse_args()
 
-    job_queue = jobs.JobQueue(args.reddis_server)
+    job_queue = jobs.JobQueue(args.redis_server)
     if args.flushdb:
         job_queue.redis_connection.flushall()
 
