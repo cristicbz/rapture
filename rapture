@@ -137,6 +137,17 @@ def parse_mappings(job_queue, mappings):
     return workers
 
 
+def parse_hostport(hostport):
+    RX = r'^(?P<host>[A-Za-z0-9-_.]+):(?P<port>[0-9]+)$'
+    match = re.match(RX, hostport)
+    if not match:
+        log.error('string "%s" is not of form host:port' % hostport)
+        sys.exit(1)
+    groups = match.groupdict()
+    groups['port'] = int(groups['port'])
+    return groups
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Rapture is a language agnostic distributed task queue '
