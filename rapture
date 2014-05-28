@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+from __future__ import print_function, division
 import argparse
 import logging
 import re
@@ -23,6 +24,8 @@ log.setLevel(logging.INFO)
 
 # Patch redis connections to use gevent sockets.
 redis.connection.socket = gevent.socket
+
+DEFAULT_REDIS = 'localhost:6379'
 
 SLAVE_SUCCESS = 0
 SLAVE_FAILURE = 1
@@ -116,10 +119,10 @@ def parse_mappings(job_queue, mappings):
 
     for i_match, match in enumerate(map(regex.match, mappings)):
         if not match:
-            print "invalid mapping '%s'" % args.mapping[i_match]
-            print 'note: format is [NWORKERS@]JOBTYPE:COMMAND and JOBTYPE is'\
-                ' an alphanumeric (and \'_\') identifier which must not begin'\
-                ' with a digit.'
+            print("invalid mapping '%s'" % args.mapping[i_match])
+            print('note: format is [NWORKERS@]JOBTYPE:COMMAND and JOBTYPE is'
+                ' an alphanumeric (and \'_\') identifier which must not begin'
+                ' with a digit.')
             sys.exit(1)
 
         (n_workers, job_type, command) = match.groups()
@@ -135,15 +138,22 @@ def parse_mappings(job_queue, mappings):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        '--redis-server', metavar='ENDPOINT', type=str, nargs='?',
-        default='localhost')
-    parser.add_argument(
-        'mapping', metavar='NWORKERS@JOBTYPE:COMMAND', type=str, nargs='+')
+    parser = argparse.ArgumentParser(
+        description='Rapture is a language agnostic distributed task queue '
+        'built on top of Redis and written in Python.')
+    _arg = parser.add_argument
+    _arg('--redis', metavar='host:port', type=str,
+         default=DEFAULT_REDIS, action='store',
+         help='Redis endpoint specified as host:port - default: %s)'
+         % DEFAULT_REDIS)
+    _arg('mapping', metavar='num@jobtype:command', type=str, nargs='+',
+         help='Job specification - can be specified multiple times.\n'
+         'For example: 4@parse:/usr/bin/parser would run '
+         'the command /usr/bin/parser up to a maximum of 4 processes '
+         'in parallel with the job type identified as "parse"')
     args = parser.parse_args()
 
-    job_queue = jobs.JobQueue(args.redis_server)
+    job_queue = jobs.connect_to_queue(**parse_hostport(args.redis))
 
     workers = map(gevent.spawn, parse_mappings(job_queue, args.mapping))
     gevent.signal(signal.SIGINT, lambda: signal_handler(job_queue, workers))

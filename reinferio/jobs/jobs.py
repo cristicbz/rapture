@@ -16,9 +16,9 @@ FIELD_MESSAGE = 'message'
 FIELD_TIMESTAMP = 'timestamp'
 
 STATUS_LEN = 1
-STATUS_PENDING = 'P'
-STATUS_FAILED = 'F'
-STATUS_DONE = 'D'
+STATUS_PENDING = 'pending'
+STATUS_FAILED = 'failed'
+STATUS_DONE = 'done'
 
 SCRIPT_CONSTANTS = {'f_status': FIELD_STATUS, 'f_queue_id': FIELD_QUEUE_KEY,
                     'f_blob': FIELD_BLOB, 'status_pending': STATUS_PENDING,
@@ -93,14 +93,14 @@ ProgressNotifcation = namedtuple('ProgressNotifcation',
                                  'job_id status message')
 
 
-class JobQueue(object):
+def connect_to_queue(host='localhost', port=6379,
+                     db=0, password=None):
+    return JobQueue(redis.StrictRedis(host, port, db, password))
 
-    def __init__(self, endpoint, db=None):
-        if type(endpoint) == str:
-            self._redis = redis.StrictRedis(endpoint, db=(db or 0))
-        else:
-            assert db is None
-            self._redis = endpoint
+
+class JobQueue(object):
+    def __init__(self, redis_client):
+        self._redis = redis_client
 
         self._script_new = self._redis.register_script(SCRIPT_NEW)
         self._script_resolve = self._redis.register_script(SCRIPT_RESOLVE)
