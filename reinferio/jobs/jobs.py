@@ -18,9 +18,9 @@ FIELD_MESSAGE = 'message'
 FIELD_TIMESTAMP = 'timestamp'
 
 STATUS_LEN = 1
-STATUS_PENDING = 'pending'
-STATUS_FAILED = 'failed'
-STATUS_DONE = 'done'
+STATUS_PENDING = 'P'
+STATUS_FAILED = 'F'
+STATUS_DONE = 'D'
 
 SCRIPT_CONSTANTS = {'f_status': FIELD_STATUS, 'f_queue_id': FIELD_QUEUE_KEY,
                     'f_args': FIELD_ARGS, 'status_pending': STATUS_PENDING,
