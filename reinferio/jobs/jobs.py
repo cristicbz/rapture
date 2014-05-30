@@ -1,5 +1,7 @@
+# -*- coding: utf-8 -*-
 import base64
 from collections import namedtuple
+import json
 import os
 
 import redis
@@ -10,7 +12,7 @@ DATA_KEY_PREFIX = 'jobs:data:'
 QUEUE_KEY_PREFIX = 'jobs:queue:'
 FIELD_QUEUE_KEY = 'queue_id'
 FIELD_STATUS = 'status'
-FIELD_BLOB = 'blob'
+FIELD_ARGS = 'args'
 FIELD_PROGRESS = 'progress'
 FIELD_MESSAGE = 'message'
 FIELD_TIMESTAMP = 'timestamp'
@@ -21,20 +23,20 @@ STATUS_FAILED = 'failed'
 STATUS_DONE = 'done'
 
 SCRIPT_CONSTANTS = {'f_status': FIELD_STATUS, 'f_queue_id': FIELD_QUEUE_KEY,
-                    'f_blob': FIELD_BLOB, 'status_pending': STATUS_PENDING,
+                    'f_args': FIELD_ARGS, 'status_pending': STATUS_PENDING,
                     'status_done': STATUS_DONE, 'f_progress': FIELD_PROGRESS,
                     'f_timestamp': FIELD_TIMESTAMP, 'f_message': FIELD_MESSAGE,
                     'status_failed': STATUS_FAILED}
 
 SCRIPT_NEW = """
 local data_key, queue_key = KEYS[1], KEYS[2]
-local blob = ARGV[1]
+local args = ARGV[1]
 local rv = redis.call('hsetnx', data_key,
                       '%(f_status)s', '%(status_pending)s')
 if rv == 0 then
     return 0
 end
-redis.call('hmset', data_key, '%(f_queue_id)s', queue_key, '%(f_blob)s', blob,
+redis.call('hmset', data_key, '%(f_queue_id)s', queue_key, '%(f_args)s', args,
            '%(f_timestamp)s', 0, '%(f_progress)s', '')
 redis.call('lpush', queue_key, data_key)
 return 1
@@ -88,7 +90,7 @@ return 1
 
 
 JobSnapshot = namedtuple(
-    'JobSnapshot', 'job_id job_type status blob message progress timestamp')
+    'JobSnapshot', 'job_id job_type status args message progress timestamp')
 ProgressNotifcation = namedtuple('ProgressNotifcation',
                                  'job_id status message')
 
@@ -107,14 +109,14 @@ class JobQueue(object):
         self._script_fail = self._redis.register_script(SCRIPT_FAIL)
         self._script_progress = self._redis.register_script(SCRIPT_PROGRESS)
 
-    def push(self, job_type=None, blob='', job=None):
+    def push(self, job_type=None, args=None, job=None):
         assert (job is None) != (job_type is None)
-        job = job or make_new_job(job_type, blob)
+        job = job or make_new_job(job_type, args)
         assert_valid_job(job)
         assert job.status == STATUS_PENDING
         self._script_new(keys=[id_to_data_key(job.job_id),
                                type_to_queue_key(job.job_type)],
-                         args=[job.blob])
+                         args=[json.dumps(job.args)])
         return job
 
     def pop(self, job_type, timeout=0):
@@ -125,14 +127,15 @@ class JobQueue(object):
 
     def fetch_snapshot(self, job_id):
         job_id = ensure_job_id(job_id)
-        (queue_id, status, blob, message, progress, timestamp) = \
+        (queue_id, status, args, message, progress, timestamp) = \
             self._redis.hmget(
                 id_to_data_key(job_id),
-                FIELD_QUEUE_KEY, FIELD_STATUS, FIELD_BLOB,
+                FIELD_QUEUE_KEY, FIELD_STATUS, FIELD_ARGS,
                 FIELD_MESSAGE, FIELD_PROGRESS, FIELD_TIMESTAMP)
         assert queue_id
+        args = json.loads(args)
         job = JobSnapshot(job_id, queue_key_to_type(queue_id), status,
-                          blob, message or '', progress or '', timestamp or 0)
+                          args, message or '', progress or '', timestamp or 0)
         assert_valid_job(job)
         return job
 
@@ -186,9 +189,10 @@ class JobQueue(object):
         return self._redis
 
 
-def make_new_job(job_type, blob=''):
+def make_new_job(job_type, args=None):
+    args = args or []
     job = JobSnapshot(base64.b64encode(os.urandom(18)), job_type,
-                      STATUS_PENDING, blob, '', '', '0.0')
+                      STATUS_PENDING, args, '', '', '0.0')
     assert_valid_job(job)
     return job
 
@@ -196,7 +200,7 @@ def make_new_job(job_type, blob=''):
 def assert_valid_job(job):
     assert valid_job_id(job.job_id)
     assert valid_job_type(job.job_type)
-    assert valid_blob(job.blob)
+    assert valid_args(job.args)
     assert valid_status(job.status)
     assert valid_message(job.message)
     assert valid_progress(job.progress)
@@ -214,8 +218,9 @@ def valid_job_type(job_type):
     return type(job_type) == str
 
 
-def valid_blob(blob):
-    return type(blob) == str
+def valid_args(args):
+    return (type(args) == list) and \
+        all([isinstance(arg, basestring) for arg in args])
 
 
 def valid_status(status):
