@@ -4,7 +4,7 @@ from setuptools import setup
 
 
 setup(name='reinferio.jobs',
-      version='0.1.0',
+      version='0.1.1',
       description='reinfer.io web and related Python library',
       author='reinfer.io Ltd.',
       author_email='marius@reinfer.io',

@@ -30,13 +30,13 @@ DEFAULT_REDIS = 'localhost:6379'
 SLAVE_SUCCESS = 0
 SLAVE_FAILURE = 1
 SLAVE_PROGRESS = 2
-SLAVE_HEARTBEAT_TTL = 4
+SLAVE_HEARTBEAT_TTL = 60
 
 
-def run_command(command, arg):
-    line = command + [arg]
+def run_command(args):
+    print('args: %s' % args)
     try:
-        slave = gevent.subprocess.Popen(line, stdout=gevent.subprocess.PIPE,
+        slave = gevent.subprocess.Popen(args, stdout=gevent.subprocess.PIPE,
                                         stderr=gevent.subprocess.PIPE)
     except OSError, e:
         def generator():
@@ -91,7 +91,7 @@ def worker(job_queue, job_type, command):
         job_meta = job_queue.fetch_snapshot(job_id)
         job_queue.publish_progress(job_id)
         log.info('worker: Started %s/%s.', job_type, job_id)
-        for msg, text in run_command(command, job_meta.blob)():
+        for msg, text in run_command(command + job_meta.args)():
             if msg == SLAVE_SUCCESS:
                 job_queue.resolve(job_id)
                 log.info('worker: Success %s/%s.', job_type, job_id)
@@ -153,10 +153,9 @@ if __name__ == '__main__':
         description='Rapture is a language agnostic distributed task queue '
         'built on top of Redis and written in Python.')
     _arg = parser.add_argument
-    _arg('--redis', metavar='host:port', type=str,
-         default=DEFAULT_REDIS, action='store',
-         help='Redis endpoint specified as host:port - default: %s)'
-         % DEFAULT_REDIS)
+    _arg('--redis', metavar='host:port', type=str, default=DEFAULT_REDIS,
+         action='store', help='Redis endpoint specified as host:port - '
+         'default: %s' % DEFAULT_REDIS)
     _arg('mapping', metavar='num@jobtype:command', type=str, nargs='+',
          help='Job specification - can be specified multiple times.\n'
          'For example: 4@parse:/usr/bin/parser would run '

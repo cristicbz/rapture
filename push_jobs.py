@@ -1,6 +1,7 @@
 #!env python
 import argparse
 import re
+import shlex
 import signal
 import sys
 
@@ -14,26 +15,31 @@ from reinferio import jobs
 # Patch redis connections to use gevent sockets.
 redis.connection.socket = gevent.socket
 
+DEFAULT_REDIS = 'localhost:6379'
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--redis-server', metavar='ENDPOINT', type=str,
-                        nargs='?', default='localhost')
-    parser.add_argument('--flushdb', action='store_const', default=False,
-                        const=True)
-    parser.add_argument(
-        'jobs', metavar='JOBTYPE:DATA', type=str, nargs='*')
+    _arg = parser.add_argument
+    _arg('--redis', metavar='host:port', type=str, default=DEFAULT_REDIS,
+         action='store', help='Redis endpoint specified as host:port - '
+         'default: %s' % DEFAULT_REDIS)
+    _arg('--flushdb', action='store_const', default=False, const=True)
+    _arg('jobs', metavar='JOBTYPE:DATA', type=str, nargs='*')
     args = parser.parse_args()
 
-    job_queue = jobs.JobQueue(args.redis_server)
+    hostport = args.redis.split(':', 1)
+    job_queue = jobs.connect_to_queue(hostport[0], int(hostport[1]))
     if args.flushdb:
         job_queue.redis_connection.flushall()
 
     if len(args.jobs) == 0:
         sys.exit(0)
 
-    job_defs = map(lambda s: re.match('(\w+)(?::(.*)$)?', s).groups(), args.jobs)
-    job_ids = map(lambda j: job_queue.push(*j).job_id, job_defs)
+    job_defs = map(lambda s: re.match('(\w+)(?::(.*)$)?', s).groups(),
+                   args.jobs)
+    job_ids = map(lambda j: job_queue.push(j[0], shlex.split(j[1])).job_id,
+                  job_defs)
     id_to_blob = {ji: job_defs[i][1] for (i, ji) in enumerate(job_ids)}
 
     (progress, close) = job_queue.subscribe_to_jobs(job_ids)
@@ -62,7 +68,7 @@ if __name__ == '__main__':
         print 'JOB %s(%s)' % (id_to_blob[ji], ji)
         print '\tType     : ' + snapshot.job_type
         print '\tStatus   : ' + snapshot.status
-        print '\tBlob     : ' + snapshot.blob
+        print '\tArgs     : ' + str(snapshot.args)
         print '\tMessage  : ' + snapshot.message
         print '\tProgress : ' + snapshot.progress
         print '\tTimestamp: ' + snapshot.timestamp
