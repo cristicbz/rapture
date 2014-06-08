@@ -228,7 +228,7 @@ def valid_status(status):
 
 
 def valid_job_id(job_id):
-    return type(job_id) == str
+    return isinstance(job_id, basestring)
 
 
 def type_to_queue_key(job_type):
@@ -250,7 +250,7 @@ def data_key_to_id(data_key):
 
 
 def ensure_job_id(job_or_id):
-    if type(job_or_id) == str:
+    if isinstance(job_or_id, basestring):
         assert valid_job_id(job_or_id)
         return job_or_id
     else:
