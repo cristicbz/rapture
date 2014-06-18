@@ -26,14 +26,14 @@ log.setLevel(logging.INFO)
 redis.connection.socket = gevent.socket
 
 DEFAULT_REDIS = 'localhost:6379'
+DEFAULT_HEARTBEAT_SECONDS = 60
 
 SLAVE_SUCCESS = 0
 SLAVE_FAILURE = 1
 SLAVE_PROGRESS = 2
-SLAVE_HEARTBEAT_TTL = 60
 
 
-def run_command(commandline):
+def run_command(commandline, heartbeat_seconds):
     try:
         slave = gevent.subprocess.Popen(commandline,
                                         stdout=gevent.subprocess.PIPE,
@@ -48,8 +48,11 @@ def run_command(commandline):
     def generator():
         while True:
             line = None
-            with gevent.Timeout(SLAVE_HEARTBEAT_TTL, False):
+            if heartbeat_seconds <= 0:
                 line = slave.stdout.readline()
+            else:
+                with gevent.Timeout(heartbeat_seconds, False):
+                    line = slave.stdout.readline()
 
             if line is None:
                 slave.kill()
@@ -80,8 +83,9 @@ def run_command(commandline):
     return generator
 
 
-def worker(job_queue, job_type, command):
+def worker(job_queue, job_type, queue_options, command):
     log.info('Worker for %s up.', job_type)
+    heartbeat = queue_options['heartbeat_secs']
     while True:
         try:
             job_id = job_queue.pop(job_type)
@@ -91,7 +95,7 @@ def worker(job_queue, job_type, command):
         job_meta = job_queue.fetch_snapshot(job_id)
         job_queue.publish_progress(job_id)
         log.info('worker: Started %s/%s.', job_type, job_id)
-        for msg, text in run_command(command + job_meta.args)():
+        for msg, text in run_command(command + job_meta.args, heartbeat)():
             if msg == SLAVE_SUCCESS:
                 job_queue.resolve(job_id)
                 log.info('worker: Success %s/%s.', job_type, job_id)
@@ -110,29 +114,59 @@ def signal_handler(job_queue, greenlets):
     log.info('signal_handler: SIGINT caught, terminating greenlets...')
 
 
+def parse_queue_options(options, options_string):
+    """ Parses a 'option1=val1, option2=val2 ...' and updates the 'options'
+    dictionary with the new values."""
+
+    if not options_string:
+        return options
+
+    splitter = shlex.shlex(options_string, posix=True)
+    splitter.whitespace += ','
+    splitter.whitespace_split = True
+
+    for (option, value) in (tuple(s.split('=', 1)) for s in splitter):
+        try:
+            options[option] = type(options[option])(value)
+        except ValueError:
+            print("invalid queue option value '%s' for '%s'" % (value, option))
+            sys.exit(1)
+        except KeyError:
+            print('unknown queue option \'%s\'' % option)
+            print('valid options are: %s' % ' '.join(options.iterkeys()))
+            sys.exit(1)
+
+    return options
+
+
 def parse_mappings(job_queue, mappings):
-    regex = re.compile(r'^(?:(\d+)@)?([a-zA-Z_]\w*):(.+)$')
+    regex = re.compile(r'^(?:(\d+)@)?([a-zA-Z_]\w*)(?:\[([^\]]*)\])?:(.+)$')
     workers = []
 
-    def make_n_workers(n, job_type, command):
-        return n * [lambda: worker(job_queue, job_type, command)]
+    def add_n_workers(n, job_type, queue_options, command):
+        for _ in xrange(n):
+            workers.append(
+                lambda: worker(job_queue, job_type, queue_options, command))
 
     for i_match, match in enumerate(map(regex.match, mappings)):
         if not match:
             print("invalid mapping '%s'" % args.mapping[i_match])
-            print('note: format is [NWORKERS@]JOBTYPE:COMMAND and JOBTYPE is'
-                ' an alphanumeric (and \'_\') identifier which must not begin'
-                ' with a digit.')
+            print('note: format is [NWORKERS@]JOBTYPE[[OPTIONS]]:COMMAND and'
+                  ' JOBTYPE is an alphanumeric (and \'_\') identifier which'
+                  ' must not begin with a digit.')
             sys.exit(1)
 
-        (n_workers, job_type, command) = match.groups()
+        (n_workers, job_type, options_string, command) = match.groups()
+
         n_workers = int(n_workers) if n_workers else 1
         command = shlex.split(command)
-        log.info('main: Creating %d worker(s) for %s, with command %r',
-             n_workers, job_type, command)
+        queue_options = {'heartbeat_secs': DEFAULT_HEARTBEAT_SECONDS}
+        queue_options = parse_queue_options(queue_options, options_string)
 
-        workers.extend(make_n_workers(n_workers, job_type, command))
-        job_type = None
+        log.info('main: Creating %d worker(s) for %s, with command %r and'
+                 ' options %s.', n_workers, job_type, command, queue_options)
+
+        add_n_workers(n_workers, job_type, queue_options, command)
 
     return workers
 
