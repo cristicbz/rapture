@@ -15,7 +15,8 @@ FIELD_STATUS = 'status'
 FIELD_ARGS = 'args'
 FIELD_PROGRESS = 'progress'
 FIELD_MESSAGE = 'message'
-FIELD_TIMESTAMP = 'timestamp'
+FIELD_TIME_UPDATED = 'time_updated'
+FIELD_TIME_CREATED = 'time_created'
 
 STATUS_LEN = 1
 STATUS_PENDING = 'P'
@@ -25,19 +26,21 @@ STATUS_DONE = 'D'
 SCRIPT_CONSTANTS = {'f_status': FIELD_STATUS, 'f_queue_id': FIELD_QUEUE_KEY,
                     'f_args': FIELD_ARGS, 'status_pending': STATUS_PENDING,
                     'status_done': STATUS_DONE, 'f_progress': FIELD_PROGRESS,
-                    'f_timestamp': FIELD_TIMESTAMP, 'f_message': FIELD_MESSAGE,
-                    'status_failed': STATUS_FAILED}
+                    'f_time_updated': FIELD_TIME_UPDATED,
+                    'f_time_created': FIELD_TIME_CREATED,
+                    'f_message': FIELD_MESSAGE, 'status_failed': STATUS_FAILED}
 
 SCRIPT_NEW = """
 local data_key, queue_key = KEYS[1], KEYS[2]
-local args = ARGV[1]
+local args, time_created = ARGV[1], ARGV[2]
 local rv = redis.call('hsetnx', data_key,
                       '%(f_status)s', '%(status_pending)s')
 if rv == 0 then
     return 0
 end
 redis.call('hmset', data_key, '%(f_queue_id)s', queue_key, '%(f_args)s', args,
-           '%(f_timestamp)s', 0, '%(f_progress)s', '')
+           '%(f_time_updated)s', time_created, '%(f_progress)s', '',
+           '%(f_time_created)s', time_created)
 redis.call('lpush', queue_key, data_key)
 return 1
 """ % SCRIPT_CONSTANTS
@@ -53,12 +56,13 @@ end
 redis.call('hset', data_key, '%(f_status)s', '%(status_done)s')
 redis.call('publish', data_key, '%(status_done)s')
 redis.call('lrem', inprogress_key, 1, data_key)
-redis.call('hset', data_key, '%(f_timestamp)s', timestamp)
+redis.call('hset', data_key, '%(f_time_updated)s', timestamp)
 return 1
 """ % SCRIPT_CONSTANTS
 
 SCRIPT_FAIL = """
-local data_key, inprogress_key, message = KEYS[1], KEYS[2], ARGV[1]
+local data_key, inprogress_key = KEYS[1], KEYS[2]
+local message, timestamp = ARGV[1], ARGV[2]
 local rv = redis.call('hget', data_key, '%(f_status)s')
 if rv == nil then
     return {err='inexistent job'}
@@ -67,7 +71,7 @@ elseif rv ~= '%(status_pending)s' then
 end
 redis.call('hmset', data_key,
            '%(f_status)s', '%(status_failed)s',
-           '%(f_message)s', message)
+           '%(f_message)s', message, '%(f_time_updated)s', timestamp)
 redis.call('publish', data_key, '%(status_failed)s' .. message)
 redis.call('lrem', inprogress_key, 1, data_key)
 return 1
@@ -81,7 +85,7 @@ if rv == nil then
 elseif rv ~= '%(status_pending)s' then
     return 0
 end
-redis.call('hset', data_key, '%(f_timestamp)s', timestamp)
+redis.call('hset', data_key, '%(f_time_updated)s', timestamp)
 if progress ~= '' then
     redis.call('publish', data_key, '%(status_pending)s' .. progress)
 end
@@ -90,9 +94,12 @@ return 1
 
 
 JobSnapshot = namedtuple(
-    'JobSnapshot', 'job_id job_type status args message progress timestamp')
+    'JobSnapshot',
+    ' '.join(('job_id', 'job_type', FIELD_STATUS, FIELD_ARGS, FIELD_MESSAGE,
+              FIELD_PROGRESS, FIELD_TIME_CREATED, FIELD_TIME_UPDATED)))
 ProgressNotifcation = namedtuple('ProgressNotifcation',
-                                 'job_id status message')
+                                 ' '.join((
+                                     'job_id', FIELD_STATUS, FIELD_MESSAGE)))
 
 
 def connect_to_queue(host='localhost', port=6379,
@@ -101,6 +108,7 @@ def connect_to_queue(host='localhost', port=6379,
 
 
 class JobQueue(object):
+
     def __init__(self, redis_client):
         self._redis = redis_client
 
@@ -111,12 +119,12 @@ class JobQueue(object):
 
     def push(self, job_type=None, args=None, job=None):
         assert (job is None) != (job_type is None)
-        job = job or make_new_job(job_type, args)
+        job = job or make_new_job(job_type, args, self.timestamp())
         assert_valid_job(job)
         assert job.status == STATUS_PENDING
         self._script_new(keys=[id_to_data_key(job.job_id),
                                type_to_queue_key(job.job_type)],
-                         args=[json.dumps(job.args)])
+                         args=[json.dumps(job.args), job.time_created])
         return job
 
     def pop(self, job_type, timeout=0):
@@ -127,15 +135,18 @@ class JobQueue(object):
 
     def fetch_snapshot(self, job_id):
         job_id = ensure_job_id(job_id)
-        (queue_id, status, args, message, progress, timestamp) = \
+        (queue_id, status, args, message,
+         progress, time_created, time_updated) = \
             self._redis.hmget(
                 id_to_data_key(job_id),
                 FIELD_QUEUE_KEY, FIELD_STATUS, FIELD_ARGS,
-                FIELD_MESSAGE, FIELD_PROGRESS, FIELD_TIMESTAMP)
+                FIELD_MESSAGE, FIELD_PROGRESS, FIELD_TIME_CREATED,
+                FIELD_TIME_UPDATED)
         assert queue_id
         args = json.loads(args)
         job = JobSnapshot(job_id, queue_key_to_type(queue_id), status,
-                          args, message or '', progress or '', timestamp or 0)
+                          args, message or '', progress or '',
+                          time_created or '0.0', time_updated or '0.0')
         assert_valid_job(job)
         return job
 
@@ -178,7 +189,7 @@ class JobQueue(object):
     def fail(self, job_id, message):
         job_id = ensure_job_id(job_id)
         self._script_fail(keys=[id_to_data_key(job_id), INPROGRESS_KEY],
-                          args=[message])
+                          args=[message, self.timestamp()])
 
     def monitor_inprogress(self):
         key = self._redis.brpoplpush(INPROGRESS_KEY, INPROGRESS_KEY)
@@ -189,10 +200,10 @@ class JobQueue(object):
         return self._redis
 
 
-def make_new_job(job_type, args=None):
+def make_new_job(job_type, args=None, timestamp='0.0'):
     args = args or []
     job = JobSnapshot(base64.b64encode(os.urandom(18)), job_type,
-                      STATUS_PENDING, args, '', '', '0.0')
+                      STATUS_PENDING, args, '', '', timestamp, timestamp)
     assert_valid_job(job)
     return job
 
