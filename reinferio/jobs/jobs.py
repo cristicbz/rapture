@@ -23,12 +23,16 @@ STATUS_PENDING = 'P'
 STATUS_FAILED = 'F'
 STATUS_DONE = 'D'
 
-SCRIPT_CONSTANTS = {'f_status': FIELD_STATUS, 'f_queue_id': FIELD_QUEUE_KEY,
-                    'f_args': FIELD_ARGS, 'status_pending': STATUS_PENDING,
-                    'status_done': STATUS_DONE, 'f_progress': FIELD_PROGRESS,
-                    'f_time_updated': FIELD_TIME_UPDATED,
+SCRIPT_CONSTANTS = {'f_args': FIELD_ARGS,
+                    'f_message': FIELD_MESSAGE,
+                    'f_progress': FIELD_PROGRESS,
+                    'f_queue_id': FIELD_QUEUE_KEY,
+                    'f_status': FIELD_STATUS,
                     'f_time_created': FIELD_TIME_CREATED,
-                    'f_message': FIELD_MESSAGE, 'status_failed': STATUS_FAILED}
+                    'f_time_updated': FIELD_TIME_UPDATED,
+                    'status_done': STATUS_DONE,
+                    'status_failed': STATUS_FAILED,
+                    'status_pending': STATUS_PENDING}
 
 SCRIPT_NEW = """
 local data_key, queue_key = KEYS[1], KEYS[2]
@@ -38,8 +42,11 @@ local rv = redis.call('hsetnx', data_key,
 if rv == 0 then
     return 0
 end
-redis.call('hmset', data_key, '%(f_queue_id)s', queue_key, '%(f_args)s', args,
-           '%(f_time_updated)s', time_created, '%(f_progress)s', '',
+redis.call('hmset', data_key,
+           '%(f_queue_id)s', queue_key,
+           '%(f_args)s', args,
+           '%(f_progress)s', '',
+           '%(f_time_updated)s', time_created,
            '%(f_time_created)s', time_created)
 redis.call('lpush', queue_key, data_key)
 return 1
@@ -71,7 +78,8 @@ elseif rv ~= '%(status_pending)s' then
 end
 redis.call('hmset', data_key,
            '%(f_status)s', '%(status_failed)s',
-           '%(f_message)s', message, '%(f_time_updated)s', timestamp)
+           '%(f_message)s', message,
+           '%(f_time_updated)s', timestamp)
 redis.call('publish', data_key, '%(status_failed)s' .. message)
 redis.call('lrem', inprogress_key, 1, data_key)
 return 1
@@ -95,11 +103,11 @@ return 1
 
 JobSnapshot = namedtuple(
     'JobSnapshot',
-    ' '.join(('job_id', 'job_type', FIELD_STATUS, FIELD_ARGS, FIELD_MESSAGE,
-              FIELD_PROGRESS, FIELD_TIME_CREATED, FIELD_TIME_UPDATED)))
-ProgressNotifcation = namedtuple('ProgressNotifcation',
-                                 ' '.join((
-                                     'job_id', FIELD_STATUS, FIELD_MESSAGE)))
+    ' '.join(('job_id', 'job_type',
+              FIELD_STATUS, FIELD_ARGS, FIELD_MESSAGE, FIELD_PROGRESS,
+              FIELD_TIME_CREATED, FIELD_TIME_UPDATED)))
+ProgressNotifcation = namedtuple(
+    'ProgressNotifcation', ' '.join(('job_id', FIELD_STATUS, FIELD_MESSAGE)))
 
 
 def connect_to_queue(host='localhost', port=6379,
@@ -218,15 +226,15 @@ def assert_valid_job(job):
 
 
 def valid_message(message):
-    return type(message) == str
+    return isinstance(message, basestring)
 
 
 def valid_progress(progress):
-    return type(progress) == str
+    return isinstance(progress, basestring)
 
 
 def valid_job_type(job_type):
-    return type(job_type) == str
+    return isinstance(job_type, basestring)
 
 
 def valid_args(args):
