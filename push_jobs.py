@@ -40,7 +40,7 @@ if __name__ == '__main__':
                    args.jobs)
     job_ids = map(lambda j: job_queue.push(j[0], shlex.split(j[1])).job_id,
                   job_defs)
-    id_to_blob = {ji: job_defs[i][1] for (i, ji) in enumerate(job_ids)}
+    id_to_args = {ji: job_defs[i][1] for (i, ji) in enumerate(job_ids)}
 
     (progress, close) = job_queue.subscribe_to_jobs(job_ids)
     gevent.signal(signal.SIGINT, close)
@@ -48,7 +48,7 @@ if __name__ == '__main__':
     def subscriber():
         for notification in progress():
             ji = notification.job_id
-            blob = id_to_blob[ji]
+            blob = id_to_args[ji]
             if notification.status == jobs.STATUS_DONE:
                 print 'DONE %s(%s)' % (blob, ji)
             elif notification.status == jobs.STATUS_FAILED:
@@ -65,10 +65,11 @@ if __name__ == '__main__':
     for ji in job_ids:
         snapshot = job_queue.fetch_snapshot(ji)
         print '=================================='
-        print 'JOB %s(%s)' % (id_to_blob[ji], ji)
-        print '\tType     : ' + snapshot.job_type
-        print '\tStatus   : ' + snapshot.status
-        print '\tArgs     : ' + str(snapshot.args)
-        print '\tMessage  : ' + snapshot.message
-        print '\tProgress : ' + snapshot.progress
-        print '\tTimestamp: ' + snapshot.timestamp
+        print 'JOB "%s"(%s)' % (id_to_args[ji], ji)
+        print '\tType        : ' + snapshot.job_type
+        print '\tStatus      : ' + snapshot.status
+        print '\tArgs        : ' + str(snapshot.args)
+        print '\tMessage     : ' + snapshot.message
+        print '\tProgress    : ' + snapshot.progress
+        print '\tTime created: ' + snapshot.time_created
+        print '\tTime updated: ' + snapshot.time_updated
