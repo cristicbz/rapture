@@ -33,14 +33,14 @@ SLAVE_PROGRESS = 2
 SLAVE_HEARTBEAT_TTL = 60
 
 
-def run_command(args):
-    print('args: %s' % args)
+def run_command(commandline):
     try:
-        slave = gevent.subprocess.Popen(args, stdout=gevent.subprocess.PIPE,
+        slave = gevent.subprocess.Popen(commandline,
+                                        stdout=gevent.subprocess.PIPE,
                                         stderr=gevent.subprocess.PIPE)
     except OSError, e:
         def generator():
-            errmsg = 'popen failed %r - %s' % (line, e.message)
+            errmsg = 'popen failed %r - %s' % (commandline, e)
             yield SLAVE_FAILURE, 'ERROR: %s:' % errmsg
             log.fatal(errmsg)
         return generator
