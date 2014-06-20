@@ -15,6 +15,7 @@ FIELD_STATUS = 'status'
 FIELD_ARGS = 'args'
 FIELD_PROGRESS = 'progress'
 FIELD_MESSAGE = 'message'
+FIELD_USERDATA = 'userdata'
 FIELD_TIME_UPDATED = 'time_updated'
 FIELD_TIME_CREATED = 'time_created'
 
@@ -28,6 +29,7 @@ SCRIPT_CONSTANTS = {'f_args': FIELD_ARGS,
                     'f_progress': FIELD_PROGRESS,
                     'f_queue_id': FIELD_QUEUE_KEY,
                     'f_status': FIELD_STATUS,
+                    'f_userdata': FIELD_USERDATA,
                     'f_time_created': FIELD_TIME_CREATED,
                     'f_time_updated': FIELD_TIME_UPDATED,
                     'status_done': STATUS_DONE,
@@ -36,7 +38,7 @@ SCRIPT_CONSTANTS = {'f_args': FIELD_ARGS,
 
 SCRIPT_NEW = """
 local data_key, queue_key = KEYS[1], KEYS[2]
-local args, time_created = ARGV[1], ARGV[2]
+local args, userdata, time_created = ARGV[1], ARGV[2], ARGV[3]
 local rv = redis.call('hsetnx', data_key,
                       '%(f_status)s', '%(status_pending)s')
 if rv == 0 then
@@ -46,6 +48,7 @@ redis.call('hmset', data_key,
            '%(f_queue_id)s', queue_key,
            '%(f_args)s', args,
            '%(f_progress)s', '',
+           '%(f_userdata)s', userdata,
            '%(f_time_updated)s', time_created,
            '%(f_time_created)s', time_created)
 redis.call('lpush', queue_key, data_key)
@@ -105,18 +108,16 @@ JobSnapshot = namedtuple(
     'JobSnapshot',
     ' '.join(('job_id', 'job_type',
               FIELD_STATUS, FIELD_ARGS, FIELD_MESSAGE, FIELD_PROGRESS,
-              FIELD_TIME_CREATED, FIELD_TIME_UPDATED)))
+              FIELD_USERDATA, FIELD_TIME_CREATED, FIELD_TIME_UPDATED)))
 ProgressNotifcation = namedtuple(
     'ProgressNotifcation', ' '.join(('job_id', FIELD_STATUS, FIELD_MESSAGE)))
 
 
-def connect_to_queue(host='localhost', port=6379,
-                     db=0, password=None):
+def connect_to_queue(host='localhost', port=6379, db=0, password=None):
     return JobQueue(redis.StrictRedis(host, port, db, password))
 
 
 class JobQueue(object):
-
     def __init__(self, redis_client):
         self._redis = redis_client
 
@@ -125,14 +126,16 @@ class JobQueue(object):
         self._script_fail = self._redis.register_script(SCRIPT_FAIL)
         self._script_progress = self._redis.register_script(SCRIPT_PROGRESS)
 
-    def push(self, job_type=None, args=None, job=None):
+    def push(self, job_type=None, args=None, userdata=None, job=None):
         assert (job is None) != (job_type is None)
-        job = job or make_new_job(job_type, args, self.timestamp())
+        job = job or make_new_job(job_type, args, userdata, self.timestamp())
         assert_valid_job(job)
         assert job.status == STATUS_PENDING
         self._script_new(keys=[id_to_data_key(job.job_id),
                                type_to_queue_key(job.job_type)],
-                         args=[json.dumps(job.args), job.time_created])
+                         args=[json.dumps(job.args),
+                               userdata,
+                               job.time_created])
         return job
 
     def pop(self, job_type, timeout=0):
@@ -144,16 +147,16 @@ class JobQueue(object):
     def fetch_snapshot(self, job_id):
         job_id = ensure_job_id(job_id)
         (queue_id, status, args, message,
-         progress, time_created, time_updated) = \
+         progress, userdata, time_created, time_updated) = \
             self._redis.hmget(
                 id_to_data_key(job_id),
                 FIELD_QUEUE_KEY, FIELD_STATUS, FIELD_ARGS,
-                FIELD_MESSAGE, FIELD_PROGRESS, FIELD_TIME_CREATED,
-                FIELD_TIME_UPDATED)
+                FIELD_MESSAGE, FIELD_PROGRESS, FIELD_USERDATA,
+                FIELD_TIME_CREATED, FIELD_TIME_UPDATED)
         assert queue_id
         args = json.loads(args)
         job = JobSnapshot(job_id, queue_key_to_type(queue_id), status,
-                          args, message or '', progress or '',
+                          args, message or '', progress or '', userdata or '',
                           time_created or '0.0', time_updated or '0.0')
         assert_valid_job(job)
         return job
@@ -208,10 +211,11 @@ class JobQueue(object):
         return self._redis
 
 
-def make_new_job(job_type, args=None, timestamp='0.0'):
+def make_new_job(job_type, args=None, userdata=None, timestamp='0.0'):
     args = args or []
     job = JobSnapshot(base64.b64encode(os.urandom(18)), job_type,
-                      STATUS_PENDING, args, '', '', timestamp, timestamp)
+                      STATUS_PENDING, args or '', '', '', userdata or '',
+                      timestamp, timestamp)
     assert_valid_job(job)
     return job
 
@@ -223,6 +227,7 @@ def assert_valid_job(job):
     assert valid_status(job.status)
     assert valid_message(job.message)
     assert valid_progress(job.progress)
+    assert valid_userdata(job.progress)
 
 
 def valid_message(message):
@@ -248,6 +253,10 @@ def valid_status(status):
 
 def valid_job_id(job_id):
     return isinstance(job_id, basestring)
+
+
+def valid_userdata(userdata):
+    return isinstance(userdata, basestring)
 
 
 def type_to_queue_key(job_type):
