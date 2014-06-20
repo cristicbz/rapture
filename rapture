@@ -1,12 +1,16 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 from __future__ import print_function, division
+from collections import namedtuple
+
 import argparse
 import logging
+import os
 import re
 import shlex
 import signal
 import sys
+import time
 
 import gevent
 import gevent.socket
@@ -15,96 +19,175 @@ import redis.connection
 
 from reinferio import jobs
 
-
-logging.basicConfig(format='%(asctime)s - %(levelname)s] %(message)s',
-                    datefmt="%Y-%m-%d %H:%M:%S")
-log = logging.getLogger()
-log.setLevel(logging.INFO)
-
-
-# Patch redis connections to use gevent sockets.
-redis.connection.socket = gevent.socket
-
 DEFAULT_REDIS = 'localhost:6379'
-DEFAULT_HEARTBEAT_SECONDS = 60
+DEFAULT_QUEUE_OPTIONS = {
+    'heartbeat_secs': 60,
+    'auto_heartbeat': False,
+    'timeout_secs': -1,
+}
 
-SLAVE_SUCCESS = 0
-SLAVE_FAILURE = 1
-SLAVE_PROGRESS = 2
+redis.connection.socket = gevent.socket
+log = logging.getLogger()
 
 
-def run_command(commandline, heartbeat_seconds):
-    try:
-        slave = gevent.subprocess.Popen(commandline,
-                                        stdout=gevent.subprocess.PIPE,
-                                        stderr=gevent.subprocess.PIPE)
-    except OSError, e:
-        def generator():
-            errmsg = 'popen failed %r - %s' % (commandline, e)
-            yield SLAVE_FAILURE, 'ERROR: %s:' % errmsg
-            log.fatal(errmsg)
-        return generator
+class JobRunner(object):
+    EVENT_SUCCESS, EVENT_FAILURE, EVENT_PROGRESS = 0, 1, 2
 
-    def generator():
+    Event = namedtuple('Event', ['event_type', 'message'])
+
+    def __init__(self, options, command, job_metadata):
+        self._command_path = command
+        self._metadata = job_metadata
+        self._options = options
+        self._global_timeout_seconds = options['timeout_secs']
+        self._heartbeat_seconds = options['heartbeat_secs']
+        self._auto_heartbeat = options['auto_heartbeat']
+        self._running = False
+        self._pipe_closed = False
+        self._done = False
+        self._subprocess = None
+        self._time_started = None
+
+    def iter_events(self):
         while True:
-            line = None
-            if heartbeat_seconds <= 0:
-                line = slave.stdout.readline()
+            event = self.wait_for_event()
+            if event is None:
+                return
             else:
-                with gevent.Timeout(heartbeat_seconds, False):
-                    line = slave.stdout.readline()
+                yield event
 
-            if line is None:
-                slave.kill()
-                yield SLAVE_FAILURE, \
-                    'ERROR task timed out; stderr:\n%s' % \
-                    slave.stderr.read()
-                return
+    def wait_for_event(self):
+        if self._done:
+            return
 
-            if line == '':
-                timed_out = False
-                with gevent.Timeout(1, False):
-                    errc = slave.wait()
-                    if errc == 0:
-                        yield SLAVE_SUCCESS, None
-                    elif errc < 0:
-                        yield SLAVE_FAILURE, 'ERROR signal %d; stderr:\n%s' % \
-                            (-errc, slave.stderr.read())
-                    else:
-                        yield SLAVE_FAILURE, \
-                            'ERROR exit with %d; stderr:\n%s' % \
-                            (errc, slave.stderr.read())
-                if timed_out:
-                    slave.kill()
-                    yield SLAVE_FAILURE, 'ERROR: Interleaved timeout.'
-                return
-            yield SLAVE_PROGRESS, line[:-1]
+        try:
+            if not self._running:
+                self._start_subprocess()
 
-    return generator
+            heartbeat_timeout = gevent.Timeout(self._heartbeat_seconds)
+            heartbeat_timeout.start()
+
+            global_timeout = gevent.Timeout(
+                max(0, self._times_out_at - time.time()))
+            global_timeout.start()
+
+            if self._pipe_closed:
+                (_, output) = self._subprocess.communicate()
+                return self._event_subprocess_exit(output)
+            else:
+                output = self._subprocess.stdout.readline()
+                if output:
+                    return self._event_progress(output)
+                else:
+                    self._pipe_closed = True
+                    return self.wait_for_event()
+        except OSError, os_error:
+            return self._event_popen_fail(os_error)
+        except gevent.Timeout, timeout:
+            if timeout == global_timeout:
+                return self._event_timeout()
+            elif timeout == heartbeat_timeout:
+                return self._event_heartbeat_timeout()
+            else:
+                raise
+        finally:
+            heartbeat_timeout.cancel()
+            global_timeout.cancel()
+
+    def _start_subprocess(self):
+        assert not self._running and not self._done
+        self._subprocess = gevent.subprocess.Popen(
+            self._command_path + self._metadata.args,
+            stdout=gevent.subprocess.PIPE,
+            stderr=gevent.subprocess.PIPE,
+            close_fds=True,
+            preexec_fn=os.setsid)
+
+        if self._global_timeout_seconds != -1:
+            self._times_out_at = time.time() + self._global_timeout_seconds
+        else:
+            self._times_out_at = float('inf')
+
+        self._running = True
+
+    def _finalise(self):
+        assert self._running and not self._done
+        self._running = False
+        self._done = True
+
+    def _event_popen_fail(self, os_error):
+        assert not self.done_
+        self._done = True
+        return JobRunner.Event(
+            JobRunner.EVENT_FAILURE,
+            'ERROR: rapture could not start subprocess \'%s\' with arguments'
+            ' %s; reason: %s' % (self._command_path, self._metadata.args,
+                                 os_error))
+
+    def _event_timeout(self):
+        # os.killpg instead of kill, so that all child processes of our child
+        # are also killed. In particular, if we use kill, communicate may end
+        # up hanging forever (or until the process terminates on its own).
+        os.killpg(self._subprocess.pid, signal.SIGKILL)
+        (_, stderr_log) = self._subprocess.communicate()
+        self._finalise()
+        return JobRunner.Event(
+            JobRunner.EVENT_FAILURE,
+            'ERROR task timed out; stderr:\n%s' % stderr_log)
+
+    def _event_progress(self, output_line):
+        assert self._running and not self._done
+        return JobRunner.Event(JobRunner.EVENT_PROGRESS, output_line[:-1])
+
+    def _event_heartbeat_timeout(self):
+        assert self._running and not self._done
+        if self._auto_heartbeat:
+            return JobRunner.Event(JobRunner.EVENT_PROGRESS, '')
+        else:
+            return self._event_timeout()
+
+    def _event_subprocess_exit(self, stderr_log):
+        error_code = self._subprocess.returncode
+        assert error_code is not None
+
+        self._finalise()
+        if error_code == 0:
+            return JobRunner.Event(JobRunner.EVENT_SUCCESS, None)
+        elif error_code < 0:
+            return JobRunner.Event(
+                JobRunner.EVENT_FAILURE,
+                'ERROR signal %d; stderr:\n%s' % (-error_code, stderr_log))
+        else:
+            return JobRunner.Event(
+                JobRunner.EVENT_FAILURE,
+                'ERROR exit with %d; stderr:\n%s' % (error_code, stderr_log))
 
 
 def worker(job_queue, job_type, queue_options, command):
     log.info('Worker for %s up.', job_type)
-    heartbeat = queue_options['heartbeat_secs']
     while True:
         try:
             job_id = job_queue.pop(job_type)
         except gevent.GreenletExit:
             return
 
-        job_meta = job_queue.fetch_snapshot(job_id)
+        job_metadata = job_queue.fetch_snapshot(job_id)
+        runner = JobRunner(queue_options, command, job_metadata)
         job_queue.publish_progress(job_id)
         log.info('worker: Started %s/%s.', job_type, job_id)
-        for msg, text in run_command(command + job_meta.args, heartbeat)():
-            if msg == SLAVE_SUCCESS:
+        for event in runner.iter_events():
+            if event.event_type == JobRunner.EVENT_SUCCESS:
                 job_queue.resolve(job_id)
-                log.info('worker: Success %s/%s.', job_type, job_id)
-            elif msg == SLAVE_FAILURE:
-                job_queue.fail(job_id, text)
-                log.info('worker: Failure %s/%s: %s', job_type, job_id, text)
+                log.info('worker: Succeded %s/%s.', job_type, job_id)
+            elif event.event_type == JobRunner.EVENT_FAILURE:
+                job_queue.fail(job_id, event.message)
+                log.info('worker: Failed %s/%s: %s',
+                         job_type, job_id, event.message)
             else:
-                job_queue.publish_progress(job_id, text)
-                log.info('worker: Progress %s/%s: %s', job_type, job_id, text)
+                assert event.event_type == JobRunner.EVENT_PROGRESS
+                job_queue.publish_progress(job_id, event.message)
+                log.info('worker: Progress %s/%s: %s',
+                         job_type, job_id, event.message)
 
 
 def signal_handler(job_queue, greenlets):
@@ -114,10 +197,35 @@ def signal_handler(job_queue, greenlets):
     log.info('signal_handler: SIGINT caught, terminating greenlets...')
 
 
-def parse_queue_options(options, options_string):
-    """ Parses a 'option1=val1, option2=val2 ...' and updates the 'options'
-    dictionary with the new values."""
+def validate_queue_options(options):
+    assert len(options) == len(DEFAULT_QUEUE_OPTIONS)
+    assert all(key in DEFAULT_QUEUE_OPTIONS for key in options.iterkeys())
 
+    timeout, heartbeat = options['timeout_secs'], options['heartbeat_secs']
+
+    if timeout < 1 and timeout != -1:
+        print('error: queue timeout must be greater than 1 or equal to -1')
+        sys.exit(1)
+
+    if heartbeat < 1:
+        print('error: queue heartbeat lower than 1 second not allowed')
+        sys.exit(1)
+
+
+def parse_option_value(option_type, value_string):
+    if option_type is bool:
+        value_string = value_string.lower()
+        value = value_string in ('y', '1', 'yes', 'true')
+        if not value and value_string not in ('n', '0', 'no', 'false'):
+            raise ValueError()
+    else:
+        value = option_type(value_string)
+
+    return value
+
+
+def parse_queue_options(options_string):
+    options = DEFAULT_QUEUE_OPTIONS.copy()
     if not options_string:
         return options
 
@@ -125,17 +233,20 @@ def parse_queue_options(options, options_string):
     splitter.whitespace += ','
     splitter.whitespace_split = True
 
-    for (option, value) in (tuple(s.split('=', 1)) for s in splitter):
+    for key, value in (tuple(s.split('=', 1)) for s in splitter):
         try:
-            options[option] = type(options[option])(value)
+            option_type = type(options[key])
+            options[key] = parse_option_value(option_type, value)
         except ValueError:
-            print("invalid queue option value '%s' for '%s'" % (value, option))
+            print("invalid value '%s' for %s option '%s'" %
+                  (value, option_type.__name__, key))
             sys.exit(1)
         except KeyError:
-            print('unknown queue option \'%s\'' % option)
+            print('unknown queue option \'%s\'' % key)
             print('valid options are: %s' % ' '.join(options.iterkeys()))
             sys.exit(1)
 
+    validate_queue_options(options)
     return options
 
 
@@ -160,8 +271,7 @@ def parse_mappings(job_queue, mappings):
 
         n_workers = int(n_workers) if n_workers else 1
         command = shlex.split(command)
-        queue_options = {'heartbeat_secs': DEFAULT_HEARTBEAT_SECONDS}
-        queue_options = parse_queue_options(queue_options, options_string)
+        queue_options = parse_queue_options(options_string)
 
         log.info('main: Creating %d worker(s) for %s, with command %r and'
                  ' options %s.', n_workers, job_type, command, queue_options)
@@ -183,6 +293,10 @@ def parse_hostport(hostport):
 
 
 if __name__ == '__main__':
+    logging.basicConfig(format='%(asctime)s - %(levelname)s] %(message)s',
+                        datefmt="%Y-%m-%d %H:%M:%S")
+    log.setLevel(logging.DEBUG)
+
     parser = argparse.ArgumentParser(
         description='Rapture is a language agnostic distributed task queue '
         'built on top of Redis and written in Python.')
