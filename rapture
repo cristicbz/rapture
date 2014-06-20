@@ -17,6 +17,8 @@ import gevent.socket
 import gevent.subprocess
 import redis.connection
 
+from gevent import Timeout
+from itertools import imap, izip
 from reinferio import jobs
 
 DEFAULT_REDIS = 'localhost:6379'
@@ -32,6 +34,12 @@ log = logging.getLogger()
 
 class JobRunner(object):
     EVENT_SUCCESS, EVENT_FAILURE, EVENT_PROGRESS = 0, 1, 2
+    ERR_HEARTBEAT = '[RAPTURE] Heartbeat interval exceeded; stderr:\n%s'
+    ERR_TIMEOUT = '[RAPTURE] Overall runtime limit exceeded; stderr:\n%s'
+    ERR_SIGNAL = '[RAPTURE] Killed by signal %d; stderr follows:\n%s'
+    ERR_NONZERO_EXIT = '[RAPTURE] Non-zero exit code %d; stderr follows:\n%s'
+    ERR_POPEN_FAIL = '[RAPTURE] Could not start subprocess \'%s\' with' \
+                     ' arguments %s. Reason: %s'
 
     Event = namedtuple('Event', ['event_type', 'message'])
 
@@ -43,49 +51,43 @@ class JobRunner(object):
         self._heartbeat_seconds = options['heartbeat_secs']
         self._auto_heartbeat = options['auto_heartbeat']
         self._running = False
-        self._pipe_closed = False
         self._done = False
         self._subprocess = None
+        self._stdout_still_open = True
         self._time_started = None
 
-    def iter_events(self):
-        while True:
-            event = self.wait_for_event()
-            if event is None:
-                return
-            else:
-                yield event
+    def iterevents(self):
+        return iter(self.next_event, None)
 
-    def wait_for_event(self):
+    def next_event(self):
+        # Start the subprocess if not already running.
         if self._done:
             return
-
-        try:
-            if not self._running:
+        elif not self._running:
+            try:
                 self._start_subprocess()
+            except OSError, os_error:
+                return self._event_popen_fail(os_error)
 
-            heartbeat_timeout = gevent.Timeout(self._heartbeat_seconds)
-            heartbeat_timeout.start()
+        # Grab next progress line from process or wait for it to exit if stdout
+        # is closed.
+        try:
+            global_timeout = Timeout.start_new(self._timeout_at - time.time())
+            heartbeat_timeout = Timeout.start_new(self._heartbeat_seconds)
 
-            global_timeout = gevent.Timeout(
-                max(0, self._times_out_at - time.time()))
-            global_timeout.start()
-
-            if self._pipe_closed:
-                (_, output) = self._subprocess.communicate()
-                return self._event_subprocess_exit(output)
-            else:
-                output = self._subprocess.stdout.readline()
-                if output:
-                    return self._event_progress(output)
+            if self._stdout_still_open:
+                progress_line = self._subprocess.stdout.readline()
+                if progress_line:
+                    return self._event_progress(progress_line)
                 else:
-                    self._pipe_closed = True
-                    return self.wait_for_event()
-        except OSError, os_error:
-            return self._event_popen_fail(os_error)
-        except gevent.Timeout, timeout:
+                    self._stdout_still_open = False
+                    return self.next_event()
+            else:
+                stderr_log = self._subprocess.communicate()[1]
+                return self._event_subprocess_exit(stderr_log)
+        except Timeout, timeout:
             if timeout == global_timeout:
-                return self._event_timeout()
+                return self._event_overall_timeout()
             elif timeout == heartbeat_timeout:
                 return self._event_heartbeat_timeout()
             else:
@@ -98,15 +100,13 @@ class JobRunner(object):
         assert not self._running and not self._done
         self._subprocess = gevent.subprocess.Popen(
             self._command_path + self._metadata.args,
-            stdout=gevent.subprocess.PIPE,
-            stderr=gevent.subprocess.PIPE,
-            close_fds=True,
-            preexec_fn=os.setsid)
+            stdout=gevent.subprocess.PIPE, stderr=gevent.subprocess.PIPE,
+            close_fds=True, preexec_fn=os.setsid)
 
         if self._global_timeout_seconds != -1:
-            self._times_out_at = time.time() + self._global_timeout_seconds
+            self._timeout_at = time.time() + self._global_timeout_seconds
         else:
-            self._times_out_at = float('inf')
+            self._timeout_at = float('+inf')
 
         self._running = True
 
@@ -115,36 +115,33 @@ class JobRunner(object):
         self._running = False
         self._done = True
 
-    def _event_popen_fail(self, os_error):
-        assert not self.done_
-        self._done = True
-        return JobRunner.Event(
-            JobRunner.EVENT_FAILURE,
-            'ERROR: rapture could not start subprocess \'%s\' with arguments'
-            ' %s; reason: %s' % (self._command_path, self._metadata.args,
-                                 os_error))
-
-    def _event_timeout(self):
+    def _kill_and_grab_stderr(self):
+        assert self._running and not self._done
         # os.killpg instead of kill, so that all child processes of our child
         # are also killed. In particular, if we use kill, communicate may end
         # up hanging forever (or until the process terminates on its own).
         os.killpg(self._subprocess.pid, signal.SIGKILL)
-        (_, stderr_log) = self._subprocess.communicate()
         self._finalise()
+        return self._subprocess.communicate()[1]
+
+    def _event_overall_timeout(self):
+        assert self._running and not self._done
         return JobRunner.Event(
             JobRunner.EVENT_FAILURE,
-            'ERROR task timed out; stderr:\n%s' % stderr_log)
+            JobRunner.ERR_TIMEOUT % self._kill_and_grab_stderr())
 
-    def _event_progress(self, output_line):
+    def _event_progress(self, progress_line):
         assert self._running and not self._done
-        return JobRunner.Event(JobRunner.EVENT_PROGRESS, output_line[:-1])
+        return JobRunner.Event(JobRunner.EVENT_PROGRESS, progress_line[:-1])
 
     def _event_heartbeat_timeout(self):
         assert self._running and not self._done
         if self._auto_heartbeat:
             return JobRunner.Event(JobRunner.EVENT_PROGRESS, '')
         else:
-            return self._event_timeout()
+            return JobRunner.Event(
+                JobRunner.EVENT_FAILURE,
+                JobRunner.ERR_HEARTBEAT % self._kill_and_grab_stderr())
 
     def _event_subprocess_exit(self, stderr_log):
         error_code = self._subprocess.returncode
@@ -156,26 +153,33 @@ class JobRunner(object):
         elif error_code < 0:
             return JobRunner.Event(
                 JobRunner.EVENT_FAILURE,
-                'ERROR signal %d; stderr:\n%s' % (-error_code, stderr_log))
+                JobRunner.ERR_SIGNAL % (-error_code, stderr_log))
         else:
             return JobRunner.Event(
                 JobRunner.EVENT_FAILURE,
-                'ERROR exit with %d; stderr:\n%s' % (error_code, stderr_log))
+                JobRunner.ERR_NONZERO_EXIT % (error_code, stderr_log))
+
+    def _event_popen_fail(self, os_error):
+        assert not self._done
+        self._done = True
+        return JobRunner.Event(
+            JobRunner.EVENT_FAILURE, JobRunner.ERR_POPEN_FAIL %
+            (self._command_path, self._metadata.args, os_error))
 
 
 def worker(job_queue, job_type, queue_options, command):
-    log.info('Worker for %s up.', job_type)
+    log.info('worker: Greenlet for %s up.', job_type)
     while True:
         try:
             job_id = job_queue.pop(job_type)
         except gevent.GreenletExit:
-            return
+            break
 
         job_metadata = job_queue.fetch_snapshot(job_id)
         runner = JobRunner(queue_options, command, job_metadata)
         job_queue.publish_progress(job_id)
         log.info('worker: Started %s/%s.', job_type, job_id)
-        for event in runner.iter_events():
+        for event in runner.iterevents():
             if event.event_type == JobRunner.EVENT_SUCCESS:
                 job_queue.resolve(job_id)
                 log.info('worker: Succeded %s/%s.', job_type, job_id)
@@ -192,8 +196,8 @@ def worker(job_queue, job_type, queue_options, command):
 
 def signal_handler(job_queue, greenlets):
     job_queue._redis.connection_pool.disconnect()
-    for g in greenlets:
-        g.kill()
+    for greenlet in greenlets:
+        greenlet.kill()
     log.info('signal_handler: SIGINT caught, terminating greenlets...')
 
 
@@ -215,13 +219,13 @@ def validate_queue_options(options):
 def parse_option_value(option_type, value_string):
     if option_type is bool:
         value_string = value_string.lower()
-        value = value_string in ('y', '1', 'yes', 'true')
-        if not value and value_string not in ('n', '0', 'no', 'false'):
+        parsed = value_string in ('y', '1', 'yes', 'true')
+        if not parsed and value_string not in ('n', '0', 'no', 'false'):
             raise ValueError()
     else:
-        value = option_type(value_string)
+        parsed = option_type(value_string)
 
-    return value
+    return parsed
 
 
 def parse_queue_options(options_string):
@@ -233,8 +237,15 @@ def parse_queue_options(options_string):
     splitter.whitespace += ','
     splitter.whitespace_split = True
 
-    for key, value in (tuple(s.split('=', 1)) for s in splitter):
+    for assignment in splitter:
         try:
+            # No equal sign in assignment is equivalent to 'key=True'.
+            key_and_value = assignment.split('=', 1)
+            if len(key_and_value) == 1:
+                key, value = key_and_value[0], 'True'
+            else:
+                key, value = key_and_value
+
             option_type = type(options[key])
             options[key] = parse_option_value(option_type, value)
         except ValueError:
@@ -252,16 +263,10 @@ def parse_queue_options(options_string):
 
 def parse_mappings(job_queue, mappings):
     regex = re.compile(r'^(?:(\d+)@)?([a-zA-Z_]\w*)(?:\[([^\]]*)\])?:(.+)$')
-    workers = []
 
-    def add_n_workers(n, job_type, queue_options, command):
-        for _ in xrange(n):
-            workers.append(
-                lambda: worker(job_queue, job_type, queue_options, command))
-
-    for i_match, match in enumerate(map(regex.match, mappings)):
+    for mapping, match in izip(mappings, imap(regex.match, mappings)):
         if not match:
-            print("invalid mapping '%s'" % args.mapping[i_match])
+            print("invalid mapping '%s'" % mapping)
             print('note: format is [NWORKERS@]JOBTYPE[[OPTIONS]]:COMMAND and'
                   ' JOBTYPE is an alphanumeric (and \'_\') identifier which'
                   ' must not begin with a digit.')
@@ -273,12 +278,11 @@ def parse_mappings(job_queue, mappings):
         command = shlex.split(command)
         queue_options = parse_queue_options(options_string)
 
-        log.info('main: Creating %d worker(s) for %s, with command %r and'
-                 ' options %s.', n_workers, job_type, command, queue_options)
+        log.info("main: Requested %d '%s' workers with command '%s' and"
+                 " options %s", n_workers, job_type, command, queue_options)
 
-        add_n_workers(n_workers, job_type, queue_options, command)
-
-    return workers
+        for _ in xrange(n_workers):
+            yield (job_queue, job_type, queue_options, command)
 
 
 def parse_hostport(hostport):
@@ -295,7 +299,7 @@ def parse_hostport(hostport):
 if __name__ == '__main__':
     logging.basicConfig(format='%(asctime)s - %(levelname)s] %(message)s',
                         datefmt="%Y-%m-%d %H:%M:%S")
-    log.setLevel(logging.DEBUG)
+    log.setLevel(logging.INFO)
 
     parser = argparse.ArgumentParser(
         description='Rapture is a language agnostic distributed task queue '
@@ -310,11 +314,13 @@ if __name__ == '__main__':
          'the command /usr/bin/parser up to a maximum of 4 processes '
          'in parallel with the job type identified as "parse"')
     args = parser.parse_args()
-
     job_queue = jobs.connect_to_queue(**parse_hostport(args.redis))
 
-    workers = map(gevent.spawn, parse_mappings(job_queue, args.mapping))
+    worker_args = parse_mappings(job_queue, args.mapping)
+    workers = [gevent.spawn(worker, *argstuple) for argstuple in worker_args]
+
     gevent.signal(signal.SIGINT, lambda: signal_handler(job_queue, workers))
+
     log.info('main: Spawned %d greenlets. Waiting on jobs...', len(workers))
     gevent.joinall(workers)
 
