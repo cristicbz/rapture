@@ -96,7 +96,9 @@ if rv == nil then
 elseif rv ~= '%(status_pending)s' then
     return 0
 end
-redis.call('hset', data_key, '%(f_time_updated)s', timestamp)
+redis.call('hmset', data_key,
+           '%(f_time_updated)s', timestamp,
+           '%(f_progress)s', progress)
 if progress ~= '' then
     redis.call('publish', data_key, '%(status_pending)s' .. progress)
 end
@@ -131,6 +133,9 @@ class JobQueue(object):
         self._script_fail = self._redis.register_script(SCRIPT_FAIL)
         self._script_progress = self._redis.register_script(SCRIPT_PROGRESS)
 
+    def disconnect(self):
+        self._redis.connection_pool.disconnect()
+
     def push(self, job_type=None, args=None, userdata=None, job=None):
         assert (job is None) != (job_type is None)
         job = job or make_new_job(job_type, args, userdata, self.timestamp())
@@ -139,7 +144,7 @@ class JobQueue(object):
         self._script_new(keys=[id_to_data_key(job.job_id),
                                type_to_queue_key(job.job_type)],
                          args=[json.dumps(job.args),
-                               userdata,
+                               job.userdata,
                                job.time_created])
         return job
 
@@ -219,7 +224,7 @@ class JobQueue(object):
 def make_new_job(job_type, args=None, userdata=None, timestamp='0.0'):
     args = args or []
     job = JobSnapshot(base64.b64encode(os.urandom(18)), job_type,
-                      STATUS_PENDING, args or '', '', '', userdata or '',
+                      STATUS_PENDING, args, '', '', userdata or '',
                       timestamp, timestamp)
     assert_valid_job(job)
     return job

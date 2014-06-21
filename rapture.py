@@ -19,7 +19,7 @@ import redis.connection
 
 from gevent import Timeout
 from itertools import imap, izip
-from reinferio import jobs
+import reinferio.jobs as jobs
 
 DEFAULT_REDIS = 'localhost:6379'
 DEFAULT_QUEUE_OPTIONS = {
@@ -38,7 +38,7 @@ class JobRunner(object):
     ERR_TIMEOUT = '[RAPTURE] Overall runtime limit exceeded; stderr:\n%s'
     ERR_SIGNAL = '[RAPTURE] Killed by signal %d; stderr follows:\n%s'
     ERR_NONZERO_EXIT = '[RAPTURE] Non-zero exit code %d; stderr follows:\n%s'
-    ERR_POPEN_FAIL = '[RAPTURE] Could not start subprocess \'%s\' with' \
+    ERR_POPEN_FAIL = '[RAPTURE] Could not start subprocess %s with' \
                      ' arguments %s. Reason: %s'
 
     Event = namedtuple('Event', ['event_type', 'message'])
