@@ -3,11 +3,13 @@
 from __future__ import print_function, division
 
 # Monkey patching thread is a workaround for this issue: http://bit.ly/1svAkvU
+import sys
 import gevent.monkey
+if 'threading' in sys.modules:
+    del sys.modules['threading']
 gevent.monkey.patch_thread()
 
 # Enable reinferio and rapture imports.
-import sys
 sys.path.append('../')
 
 import binascii
@@ -17,7 +19,7 @@ import signal
 import time
 import unittest
 
-from gevent.subprocess import Popen
+from gevent.subprocess import Popen, PIPE
 from gevent import Timeout
 
 import reinferio.jobs as jobs
@@ -49,24 +51,41 @@ def terminate_redis(proc, endpoint):
 
 
 def start_rapture(redis_sockfile, mappings):
-    return Popen(shlex.split(RAPTURE_COMMAND) +
+    proc = Popen(shlex.split(RAPTURE_COMMAND) +
                  ['--redis-unix-socket=' + redis_sockfile] + mappings,
-                 close_fds=True, preexec_fn=os.setsid)
+                 close_fds=True, preexec_fn=os.setsid,
+                 stderr=PIPE, stdout=PIPE)
+
+    # forward both stderr & stdout to stdout for them to be captured by
+    # nosetests
+    gevent.spawn(forward_output, proc.stderr, sys.stdout)
+    gevent.spawn(forward_output, proc.stdout, sys.stdout)
+    return proc
+
+
+def forward_output(fd_from, fd_to):
+    while True:
+        line = fd_from.readline()
+        if line == '':
+            break
+        else:
+            fd_to.write(line)
 
 
 def wait_for_rapture(proc, terminate=False):
     # Process is already dead.
     if terminate:
-        if proc.poll() is not None:
-            errcode = proc.wait()
-            return 'already-dead-errcode-%d' % errcode
+        with Timeout(.1, False):
+            proc.wait()
+            return 'already-dead-errcode-%d' % proc.returncode
 
         os.killpg(proc.pid, signal.SIGINT)
 
-    with Timeout(5):
-        errcode = proc.wait()
-        return 'errcode-%d' % errcode
+    with Timeout(5, False):
+        proc.wait()
+        return 'errcode-%d' % proc.returncode
     os.killpg(proc.pid, signal.SIGKILL)
+    proc.wait()
     return 'unresponsive'
 
 
