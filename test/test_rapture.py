@@ -11,6 +11,7 @@ import sys
 sys.path.append('../')
 
 import binascii
+import imp
 import os
 import shlex
 import signal
@@ -20,8 +21,8 @@ import unittest
 from gevent.subprocess import Popen
 from gevent import Timeout
 
-import reinferio.jobs
-import rapture
+import reinferio.jobs as jobs
+rapture = imp.load_source('rapture', '../rapture')
 
 
 REDIS_COMMAND = 'redis-server'
@@ -35,6 +36,7 @@ def start_redis():
     proc = Popen([REDIS_COMMAND, REDIS_CONF, '--unixsocket ' + sockfile,
                   '--unixsocketperm 755'],
                  close_fds=True, preexec_fn=os.setsid, cwd=REDIS_WORKING_DIR)
+    time.sleep(.1)
     return proc, os.path.join(REDIS_WORKING_DIR, sockfile)
 
 
@@ -69,15 +71,42 @@ def wait_for_rapture(proc, terminate=False):
     return 'unresponsive'
 
 
-class TestIntegration(unittest.TestCase):
+def is_nonzero_snap(snapshot, progress, code, errlog=''):
+    return snapshot.status == jobs.STATUS_FAILED and \
+        snapshot.message.startswith(
+            rapture.JobRunner.ERR_NONZERO_EXIT % (code, errlog)) and \
+        snapshot.progress == progress
+
+
+def is_signal_snap(snapshot, progress, sig, errlog=''):
+    return snapshot.status == jobs.STATUS_FAILED and \
+        snapshot.message.startswith(
+            rapture.JobRunner.ERR_SIGNAL % (sig, errlog)) and \
+        snapshot.progress == progress
+
+
+def is_pending_snap(snapshot):
+    return snapshot.status == jobs.STATUS_PENDING and \
+        snapshot.message == '' and \
+        snapshot.progress == ''
+
+
+def is_success_snap(snapshot, progress):
+    return snapshot.status == jobs.STATUS_DONE and \
+        snapshot.message == '' and snapshot.progress == progress
+
+
+class IntegrationTests(unittest.TestCase):
     def setUp(self):
         self.rapture = None
         self.redis_process, self.redis_endpoint = start_redis()
+        self.job_queue = jobs.connect_to_unix_socket_queue(self.redis_endpoint)
 
     def tearDown(self):
         assert self.redis_process is not None
         if self.rapture:
             wait_for_rapture(self.rapture, terminate=True)
+        self.job_queue.disconnect()
         terminate_redis(self.redis_process, self.redis_endpoint)
         self.redis_endpoint = None
         self.redis_process = None
@@ -105,6 +134,51 @@ class TestIntegration(unittest.TestCase):
         self.start_rapture(['s:jobs/success.sh'])
         time.sleep(.5)
         self.stop_rapture()
+
+    def test_exit_modes(self):
+        self.start_rapture(
+            ['qui:jobs/quiet.sh .2',
+             '2@suc:jobs/success.sh .2',
+             '2@seg:jobs/segfault.sh .2',
+             'trm:jobs/term.sh .2',
+             'non:jobs/nonzero.sh .2'])
+
+        ids = [self.job_queue.push('qui'),
+               self.job_queue.push('suc', args=['0', 'a']),
+               self.job_queue.push('suc', args=['1', 'b']),
+               self.job_queue.push('suc', args=['2', 'c']),
+               self.job_queue.push('seg', args=['0', 'd']),
+               self.job_queue.push('seg', args=['1', 'e']),
+               self.job_queue.push('trm', args=['0', 'f']),
+               self.job_queue.push('trm', args=['1', 'g']),
+               self.job_queue.push('non', args=['0', 'h']),
+               self.job_queue.push('non', args=['1', 'i']),
+               self.job_queue.push('xxx')]
+
+        out = [(is_success_snap, ''),
+               (is_success_snap, ''),
+               (is_success_snap, 'success-b-1'),
+               (is_success_snap, 'success-c-2'),
+               (is_signal_snap, '', signal.SIGSEGV,
+                'segfault-d-stderr-begin\nsegfault-d-stderr-end'),
+               (is_signal_snap, 'segfault-e-1', signal.SIGSEGV,
+                'segfault-e-stderr-begin\nsegfault-e-stderr-end'),
+               (is_signal_snap, '', signal.SIGTERM,
+                'term-f-stderr-begin\nterm-f-stderr-end'),
+               (is_signal_snap, 'term-g-1', signal.SIGTERM,
+                'term-g-stderr-begin\nterm-g-stderr-end'),
+               (is_nonzero_snap, '', 42,
+                'nonzero-h-stderr-begin\nnonzero-h-stderr-end'),
+               (is_nonzero_snap, 'nonzero-i-1', 42,
+                'nonzero-i-stderr-begin\nnonzero-i-stderr-end'),
+               (is_pending_snap,)]
+
+        time.sleep(1.5)
+
+        for job_id, expect in zip(ids, out):
+            snapshot = self.job_queue.fetch_snapshot(job_id)
+            assmsg = '\nSnapshot:\n %s\nExpect:\n %s' % (snapshot, expect[2:])
+            self.assertTrue(expect[0](snapshot, *expect[1:]), assmsg)
 
 
 if __name__ == '__main__':
