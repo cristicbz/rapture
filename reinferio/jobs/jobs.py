@@ -117,6 +117,11 @@ def connect_to_queue(host='localhost', port=6379, db=0, password=None):
     return JobQueue(redis.StrictRedis(host, port, db, password))
 
 
+def connect_to_unix_socket_queue(socket_path, db=0, password=None):
+    return JobQueue(redis.StrictRedis(unix_socket_path=socket_path,
+                                      db=db, password=password))
+
+
 class JobQueue(object):
     def __init__(self, redis_client):
         self._redis = redis_client

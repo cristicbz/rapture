@@ -305,16 +305,33 @@ if __name__ == '__main__':
         description='Rapture is a language agnostic distributed task queue '
         'built on top of Redis and written in Python.')
     _arg = parser.add_argument
-    _arg('--redis', metavar='host:port', type=str, default=DEFAULT_REDIS,
-         action='store', help='Redis endpoint specified as host:port - '
+    _arg('--redis-tcp', metavar='HOST:PORT', type=str, default='',
+         action='store', help='Redis TCP endpoint specified as host:port - '
          'default: %s' % DEFAULT_REDIS)
-    _arg('mapping', metavar='num@jobtype:command', type=str, nargs='+',
+    _arg('--redis-unix-socket', metavar='PATH', type=str, default='',
+         action='store', help='Redis endpoint as unix socket path.')
+    _arg('mapping', metavar='N@JOBTYPE|OPTIONS|:COMMAND', type=str, nargs='+',
          help='Job specification - can be specified multiple times.\n'
-         'For example: 4@parse:/usr/bin/parser would run '
-         'the command /usr/bin/parser up to a maximum of 4 processes '
-         'in parallel with the job type identified as "parse"')
+         'For example \'4@parse[auto_heartbeat=yes]:/bin/parser\' '
+         'would run the command /bin/parser up to a maximum of 4 '
+         'times in parallel with the job type identified as \'parse\', using '
+         'automatic heartbeats. COMMAND can also contain fixed arguments')
     args = parser.parse_args()
-    job_queue = jobs.connect_to_queue(**parse_hostport(args.redis))
+    if (args.redis_unix_socket != '') and (args.redis_tcp != ''):
+        print('error: both TCP and unix socket endpoints specified, please'
+              ' choose one or the other')
+        sys.exit(1)
+
+    try:
+        if args.redis_unix_socket:
+            job_queue = jobs.connect_to_unix_socket_queue(
+                args.redis_unix_socket)
+        else:
+            endpoint = args.redis_tcp or DEFAULT_REDIS
+            job_queue = jobs.connect_to_queue(**parse_hostport(endpoint))
+    except redis.exceptions.ConnectionError, error:
+        print('error: Could not connect to job queue: %s' % error)
+        sys.exit(1)
 
     worker_args = parse_mappings(job_queue, args.mapping)
     workers = [gevent.spawn(worker, *argstuple) for argstuple in worker_args]

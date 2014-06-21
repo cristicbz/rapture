@@ -21,15 +21,19 @@ DEFAULT_REDIS = 'localhost:6379'
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     _arg = parser.add_argument
-    _arg('--redis', metavar='host:port', type=str, default=DEFAULT_REDIS,
+    _arg('--redis', metavar='PATH|HOST:PORT', type=str, default=DEFAULT_REDIS,
          action='store', help='Redis endpoint specified as host:port - '
          'default: %s' % DEFAULT_REDIS)
     _arg('--flushdb', action='store_const', default=False, const=True)
     _arg('jobs', metavar='JOBTYPE_USERDATA_:ARGS', type=str, nargs='*')
     args = parser.parse_args()
 
-    hostport = args.redis.split(':', 1)
-    job_queue = jobs.connect_to_queue(hostport[0], int(hostport[1]))
+    endpoint = args.redis.split(':', 1)
+    if len(endpoint) == 2:
+        job_queue = jobs.connect_to_queue(endpoint[0], int(endpoint[1]))
+    else:
+        job_queue = jobs.connect_to_unix_socket_queue(endpoint[0])
+
     if args.flushdb:
         job_queue.redis_connection.flushall()
 
