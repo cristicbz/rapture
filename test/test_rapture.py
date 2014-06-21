@@ -11,7 +11,6 @@ import sys
 sys.path.append('../')
 
 import binascii
-import imp
 import os
 import shlex
 import signal
@@ -22,13 +21,13 @@ from gevent.subprocess import Popen
 from gevent import Timeout
 
 import reinferio.jobs as jobs
-rapture = imp.load_source('rapture', '../rapture')
+import rapture
 
 
 REDIS_COMMAND = 'redis-server'
 REDIS_WORKING_DIR = 'redis'
 REDIS_CONF = 'redis.conf'
-RAPTURE_COMMAND = 'env python ../rapture'
+RAPTURE_COMMAND = 'env python ../rapture.py'
 
 
 def start_redis():
