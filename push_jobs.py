@@ -39,12 +39,11 @@ if __name__ == '__main__':
     job_defs = map(
         lambda s: re.match(r'(\w+)(?:\[([^\]]+)\])?(?::(.*)$)?', s).groups(),
         args.jobs)
-    print(job_defs)
     job_ids = map(lambda j: job_queue.push(j[0],
                                            userdata=j[1],
                                            args=shlex.split(j[2])).job_id,
                   job_defs)
-    id_to_args = {ji: job_defs[i][1] for (i, ji) in enumerate(job_ids)}
+    id_to_args = {ji: job_defs[i][2] for (i, ji) in enumerate(job_ids)}
 
     (progress, close) = job_queue.subscribe_to_jobs(job_ids)
     gevent.signal(signal.SIGINT, close)
@@ -54,11 +53,11 @@ if __name__ == '__main__':
             ji = notification.job_id
             blob = id_to_args[ji]
             if notification.status == jobs.STATUS_DONE:
-                print 'DONE %s(%s)' % (blob, ji)
+                print 'DONE "%s" (id: %s)' % (blob, ji)
             elif notification.status == jobs.STATUS_FAILED:
-                print 'FAIL %s(%s): \'%s\'' % (blob, ji, notification.message)
+                print 'FAIL "%s" (id: %s): \'%s\'' % (blob, ji, notification.message)
             else:
-                print 'PROG %s(%s): \'%s\'' % (blob, ji, notification.message)
+                print 'PROG "%s" (id: %s): \'%s\'' % (blob, ji, notification.message)
     subscriber_greenlet = gevent.spawn(subscriber)
     subscriber_greenlet.join()
 
