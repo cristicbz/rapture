@@ -32,61 +32,15 @@ REDIS_CONF = 'redis.conf'
 RAPTURE_COMMAND = 'env python ../rapture.py'
 
 
-def start_redis():
-    sockfile = binascii.hexlify(os.urandom(8)) + '.sock'
-    proc = Popen([REDIS_COMMAND, REDIS_CONF, '--unixsocket ' + sockfile,
-                  '--unixsocketperm 755'],
-                 close_fds=True, preexec_fn=os.setsid, cwd=REDIS_WORKING_DIR)
-    time.sleep(.1)
-    return proc, os.path.join(REDIS_WORKING_DIR, sockfile)
-
-
-def terminate_redis(proc, endpoint):
-    os.killpg(proc.pid, signal.SIGINT)
-    proc.wait()
-    try:
-        os.remove(endpoint)
-    except OSError:
-        pass
-
-
-def start_rapture(redis_sockfile, mappings):
-    proc = Popen(shlex.split(RAPTURE_COMMAND) +
-                 ['--redis-unix-socket=' + redis_sockfile] + mappings,
-                 close_fds=True, preexec_fn=os.setsid,
-                 stderr=PIPE, stdout=PIPE)
-
-    # forward both stderr & stdout to stdout for them to be captured by
-    # nosetests
-    gevent.spawn(forward_output, proc.stderr, sys.stdout)
-    gevent.spawn(forward_output, proc.stdout, sys.stdout)
-    return proc
-
-
-def forward_output(fd_from, fd_to):
-    while True:
-        line = fd_from.readline()
-        if line == '':
-            break
-        else:
-            fd_to.write(line)
-
-
-def wait_for_rapture(proc, terminate=False):
-    # Process is already dead.
-    if terminate:
-        with Timeout(.1, False):
-            proc.wait()
-            return 'already-dead-errcode-%d' % proc.returncode
-
-        os.killpg(proc.pid, signal.SIGINT)
-
-    with Timeout(5, False):
-        proc.wait()
-        return 'errcode-%d' % proc.returncode
-    os.killpg(proc.pid, signal.SIGKILL)
-    proc.wait()
-    return 'unresponsive'
+def pipe_fd(fd_from, fd_to):
+    def greenlet():
+        while True:
+            line = fd_from.readline()
+            if line == '':
+                break
+            else:
+                fd_to.write(line)
+    return gevent.spawn(greenlet)
 
 
 def is_nonzero_snap(snapshot, progress, code, errlog=''):
@@ -114,46 +68,118 @@ def is_success_snap(snapshot, progress):
         snapshot.message == '' and snapshot.progress == progress
 
 
-class IntegrationTests(unittest.TestCase):
+class RaptureHarness(object):
     def setUp(self):
-        self.rapture = None
-        self.redis_process, self.redis_endpoint = start_redis()
-        self.job_queue = jobs.connect_to_unix_socket_queue(self.redis_endpoint)
+        self.rapture_process = None
+        self.redis_process = None
+        self.redis_endpoint = None
+        self.jobs = None
 
     def tearDown(self):
-        assert self.redis_process is not None
-        if self.rapture:
-            wait_for_rapture(self.rapture, terminate=True)
-        self.job_queue.disconnect()
-        terminate_redis(self.redis_process, self.redis_endpoint)
-        self.redis_endpoint = None
-        self.redis_process = None
-        self.rapture = None
+        if self.rapture_running():
+            self.interrupt_rapture()
 
-    def start_rapture(self, mappings):
-        assert self.rapture is None
-        assert self.redis_process is not None
-        self.rapture = start_rapture(self.redis_endpoint, mappings)
+        if self.redis_running():
+            self.stop_redis()
 
-    def stop_rapture(self):
-        assert self.rapture is not None
-        self.assertEqual(wait_for_rapture(self.rapture, True), 'errcode-0')
-        self.rapture = None
+    def start_redis(self):
+        assert self.redis_process is None
+        assert self.redis_endpoint is None
+        assert self.jobs is None
+        sockfile = binascii.hexlify(os.urandom(8)) + '.sock'
+        self.redis_process = Popen([REDIS_COMMAND, REDIS_CONF,
+                                    '--unixsocket ' + sockfile,
+                                    '--unixsocketperm 755'],
+                                   close_fds=True, preexec_fn=os.setsid,
+                                   cwd=REDIS_WORKING_DIR)
+        self.redis_endpoint = os.path.join(REDIS_WORKING_DIR, sockfile)
+        for n_attempt in xrange(4):
+            try:
+                self.jobs = \
+                    jobs.connect_to_unix_socket_queue(self.redis_endpoint)
+            except:
+                if n_attempt == 3:
+                    raise
+                else:
+                    time.sleep(.1)
 
+    def stop_redis(self):
+        assert not self.rapture_running()
+        self.jobs.disconnect()
+        os.killpg(self.redis_process.pid, signal.SIGINT)
+        self.redis_process.wait()
+        try:
+            os.remove(self.redis_endpoint)
+        except OSError:
+            pass
+        self.redis_process, self.redis_endpoint, self.jobs = None, None, None
+
+    def start_rapture(self, args):
+        assert not self.rapture_running()
+        socket = self.redis_endpoint or '/inexistent/redis/endpoint'
+
+        self.rapture_process = Popen(shlex.split(RAPTURE_COMMAND) +
+                                     ['--redis-unix-socket=' + socket] + args,
+                                     close_fds=True, preexec_fn=os.setsid,
+                                     stderr=PIPE, stdout=PIPE)
+
+        # forward both stderr & stdout to stdout for them to be captured by
+        # nosetests
+        pipe_fd(self.rapture_process.stderr, sys.stdout)
+        pipe_fd(self.rapture_process.stdout, sys.stdout)
+        return self.rapture_process
+
+    def wait_for_rapture(self):
+        assert self.rapture_running()
+        proc, self.rapture_process = self.rapture_process, None
+        with Timeout(5, False):
+            proc.wait()
+            return 'errcode-%d' % proc.returncode
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        return 'unresponsive'
+
+    def interrupt_rapture(self):
+        assert self.rapture_running()
+        with Timeout(.1, False):
+            self.rapture_process.wait()
+            proc, self.rapture_process = self.rapture_process, None
+            return 'already-dead-errcode-%d' % proc.returncode
+
+        os.killpg(self.rapture_process.pid, signal.SIGINT)
+        return self.wait_for_rapture()
+
+    def rapture_running(self):
+        return self.rapture_process is not None
+
+    def redis_running(self):
+        return self.redis_process is not None
+
+
+class SingleRaptureTestCase(unittest.TestCase, RaptureHarness):
+    setUp = RaptureHarness.setUp
+    tearDown = RaptureHarness.tearDown
+
+
+class CleanExitTests(SingleRaptureTestCase):
     def test_empty_mappings_aborts(self):
         self.start_rapture([])
-        self.assertEqual(wait_for_rapture(self.rapture), 'errcode-2')
+        self.assertEqual(self.wait_for_rapture(), 'errcode-2')
 
     def test_help_clean_exit(self):
         self.start_rapture(['-h'])
-        self.assertEqual(wait_for_rapture(self.rapture), 'errcode-0')
+        self.assertEqual(self.wait_for_rapture(), 'errcode-0')
 
     def test_interrupt_clean_exit(self):
+        self.start_redis()
         self.start_rapture(['s:jobs/success.sh'])
-        time.sleep(.5)
-        self.stop_rapture()
+        time.sleep(.1)
+        self.assertEqual(self.interrupt_rapture(), 'errcode-0')
 
+
+class IntegrationTests(SingleRaptureTestCase):
     def test_exit_modes(self):
+        self.start_redis()
         self.start_rapture(
             ['qui:jobs/quiet.sh .2',
              '2@suc:jobs/success.sh .2',
@@ -161,17 +187,17 @@ class IntegrationTests(unittest.TestCase):
              'trm:jobs/term.sh .2',
              'non:jobs/nonzero.sh .2'])
 
-        ids = [self.job_queue.push('qui'),
-               self.job_queue.push('suc', args=['0', 'a']),
-               self.job_queue.push('suc', args=['1', 'b']),
-               self.job_queue.push('suc', args=['2', 'c']),
-               self.job_queue.push('seg', args=['0', 'd']),
-               self.job_queue.push('seg', args=['1', 'e']),
-               self.job_queue.push('trm', args=['0', 'f']),
-               self.job_queue.push('trm', args=['1', 'g']),
-               self.job_queue.push('non', args=['0', 'h']),
-               self.job_queue.push('non', args=['1', 'i']),
-               self.job_queue.push('xxx')]
+        ids = [self.jobs.push('qui'),
+               self.jobs.push('suc', args=['0', 'a']),
+               self.jobs.push('suc', args=['1', 'b']),
+               self.jobs.push('suc', args=['2', 'c']),
+               self.jobs.push('seg', args=['0', 'd']),
+               self.jobs.push('seg', args=['1', 'e']),
+               self.jobs.push('trm', args=['0', 'f']),
+               self.jobs.push('trm', args=['1', 'g']),
+               self.jobs.push('non', args=['0', 'h']),
+               self.jobs.push('non', args=['1', 'i']),
+               self.jobs.push('xxx')]
 
         out = [(is_success_snap, ''),
                (is_success_snap, ''),
@@ -194,7 +220,7 @@ class IntegrationTests(unittest.TestCase):
         time.sleep(1.5)
 
         for job_id, expect in zip(ids, out):
-            snapshot = self.job_queue.fetch_snapshot(job_id)
+            snapshot = self.jobs.fetch_snapshot(job_id)
             assmsg = '\nSnapshot:\n %s\nExpect:\n %s' % (snapshot, expect[2:])
             self.assertTrue(expect[0](snapshot, *expect[1:]), assmsg)
 
