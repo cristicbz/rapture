@@ -14,6 +14,7 @@ sys.path.append('../')
 
 import binascii
 import os
+import pprint
 import shlex
 import signal
 import time
@@ -155,6 +156,31 @@ class RaptureHarness(object):
     def redis_running(self):
         return self.redis_process is not None
 
+    def assert_job_list(self, definitions, max_wait=5, interval=.1):
+        ids = map(lambda d: self.jobs.push(d[0], **d[1]), definitions)
+
+        done = False
+        expire_at = time.time() + max_wait
+        while not done:
+            done = True
+            time.sleep(interval)
+            for i, job_id, job_def in zip(xrange(len(ids)), ids, definitions):
+                snapshot = self.jobs.fetch_snapshot(job_id)
+                expect = job_def[2]
+                expect_args = job_def[3]
+                if snapshot.status == jobs.STATUS_PENDING and \
+                        expect != is_pending_snap:
+                    done = False
+                    break
+                assmsg = '\nJob Index: %d\nSnapshot:\n %s\nExpect:\n %s' % \
+                    (i, pprint.pformat(dict(snapshot._asdict())),
+                     pprint.pformat(expect_args))
+                self.assertTrue(expect(snapshot, **expect_args), assmsg)
+
+            if time.time() > expire_at:
+                break
+        self.assertTrue(done, 'Time limit exceeded %ss' % max_wait)
+
 
 class SingleRaptureTestCase(unittest.TestCase, RaptureHarness):
     setUp = RaptureHarness.setUp
@@ -187,42 +213,44 @@ class IntegrationTests(SingleRaptureTestCase):
              'trm:jobs/term.sh .2',
              'non:jobs/nonzero.sh .2'])
 
-        ids = [self.jobs.push('qui'),
-               self.jobs.push('suc', args=['0', 'a']),
-               self.jobs.push('suc', args=['1', 'b']),
-               self.jobs.push('suc', args=['2', 'c']),
-               self.jobs.push('seg', args=['0', 'd']),
-               self.jobs.push('seg', args=['1', 'e']),
-               self.jobs.push('trm', args=['0', 'f']),
-               self.jobs.push('trm', args=['1', 'g']),
-               self.jobs.push('non', args=['0', 'h']),
-               self.jobs.push('non', args=['1', 'i']),
-               self.jobs.push('xxx')]
+        self.assert_job_list(
+            [('qui', {}, is_success_snap, dict(progress='')),
+             ('suc', {'args': ['0', 'a']}, is_success_snap, dict(progress='')),
 
-        out = [(is_success_snap, ''),
-               (is_success_snap, ''),
-               (is_success_snap, 'success-b-1'),
-               (is_success_snap, 'success-c-2'),
-               (is_signal_snap, '', signal.SIGSEGV,
-                'segfault-d-stderr-begin\nsegfault-d-stderr-end'),
-               (is_signal_snap, 'segfault-e-1', signal.SIGSEGV,
-                'segfault-e-stderr-begin\nsegfault-e-stderr-end'),
-               (is_signal_snap, '', signal.SIGTERM,
-                'term-f-stderr-begin\nterm-f-stderr-end'),
-               (is_signal_snap, 'term-g-1', signal.SIGTERM,
-                'term-g-stderr-begin\nterm-g-stderr-end'),
-               (is_nonzero_snap, '', 42,
-                'nonzero-h-stderr-begin\nnonzero-h-stderr-end'),
-               (is_nonzero_snap, 'nonzero-i-1', 42,
-                'nonzero-i-stderr-begin\nnonzero-i-stderr-end'),
-               (is_pending_snap,)]
+             ('suc', {'args': ['1', 'b']}, is_success_snap,
+              dict(progress='success-b-1',)),
 
-        time.sleep(1.5)
+             ('suc', {'args': ['2', 'c']}, is_success_snap,
+              dict(progress='success-c-2',)),
 
-        for job_id, expect in zip(ids, out):
-            snapshot = self.jobs.fetch_snapshot(job_id)
-            assmsg = '\nSnapshot:\n %s\nExpect:\n %s' % (snapshot, expect[2:])
-            self.assertTrue(expect[0](snapshot, *expect[1:]), assmsg)
+             ('seg', {'args': ['0', 'd']}, is_signal_snap,
+              dict(progress='', sig=signal.SIGSEGV,
+                   errlog='segfault-d-stderr-begin\nsegfault-d-stderr-end')),
+
+             ('seg', {'args': ['1', 'e']}, is_signal_snap,
+              dict(progress='segfault-e-1', sig=signal.SIGSEGV,
+                   errlog='segfault-e-stderr-begin\nsegfault-e-stderr-end')),
+
+             ('trm', {'args': ['0', 'f']}, is_signal_snap,
+              dict(progress='', sig=signal.SIGTERM,
+                   errlog='term-f-stderr-begin\nterm-f-stderr-end')),
+
+             ('trm', {'args': ['1', 'g']}, is_signal_snap,
+              dict(progress='term-g-1', sig=signal.SIGTERM,
+                   errlog='term-g-stderr-begin\nterm-g-stderr-end')),
+
+             ('non', {'args': ['0', 'h']}, is_nonzero_snap,
+              dict(progress='', code=42,
+                   errlog='nonzero-h-stderr-begin\nnonzero-h-stderr-end')),
+
+             ('non', {'args': ['1', 'i']}, is_nonzero_snap,
+              dict(progress='nonzero-i-1', code=42,
+                   errlog='nonzero-i-stderr-begin\nnonzero-i-stderr-end')),
+
+             ('xxx', {}, is_pending_snap, {})],
+            max_wait=1.5, interval=.1)
+
+        self.assertEqual(self.interrupt_rapture(), 'errcode-0')
 
 
 if __name__ == '__main__':
