@@ -248,7 +248,7 @@ class IntegrationTests(SingleRaptureTestCase):
               dict(progress='success-e-2')),
              ('aut', {'args': ['.09', '2', 'f']}, is_success_snap,
               dict(progress='success-f-2'))],
-            max_wait=.6, interval=.1)
+            max_wait=1.5, interval=.1)
 
         self.assertEqual(self.interrupt_rapture(), 'errcode-0')
 
@@ -269,7 +269,7 @@ class IntegrationTests(SingleRaptureTestCase):
               dict(progress='success-c-1')),
              ('aut', {'args': ['.1', '4', 'd']}, is_overall_timeout_snap,
               dict(progress='success-d-2', errlog='success-d-stderr-begin\n'))
-             ], max_wait=.6, interval=.1)
+             ], max_wait=1.5, interval=.1)
 
         self.assertEqual(self.interrupt_rapture(), 'errcode-0')
 
