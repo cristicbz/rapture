@@ -1,9 +1,11 @@
 #!env python
 # -*- coding: utf-8 -*-
 from __future__ import print_function, division
+import os
+import sys
+os.chdir(os.path.dirname(os.path.realpath(sys.argv[0])))
 
 # Monkey patching thread is a workaround for this issue: http://bit.ly/1svAkvU
-import sys
 import gevent.monkey
 if 'threading' in sys.modules:
     del sys.modules['threading']
@@ -13,7 +15,6 @@ gevent.monkey.patch_thread()
 sys.path.append('../')
 
 import binascii
-import os
 import pprint
 import shlex
 import signal
@@ -315,5 +316,4 @@ class IntegrationTests(SingleRaptureTestCase):
 if __name__ == '__main__':
     ENV_REDIS_COMMANDLINE = os.environ.get('REDIS_COMMANDLINE', None)
     ENV_REDIS_ENDPOINT = os.environ.get('REDIS_ENDPOINT', None)
-    os.chdir(os.path.dirname(os.path.realpath(sys.argv[0])))
     unittest.main()
