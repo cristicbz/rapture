@@ -186,7 +186,8 @@ class JobQueue(object):
         initials = []
         for job_id in job_list:
             job_id = ensure_job_id(job_id)
-            pubsub.subscribe(id_to_data_key(job_id))
+            data_key = id_to_data_key(job_id)
+            pubsub.subscribe(data_key)
             snapshot = self.fetch_snapshot(job_id)
             initials.append(
                 ProgressNotifcation(
@@ -195,7 +196,7 @@ class JobQueue(object):
                     snapshot.progress))
 
             if snapshot.status in (STATUS_FAILED, STATUS_DONE):
-                pubsub.unsubscribe()
+                pubsub.unsubscribe(data_key)
 
         return ProgressListener(pubsub, initials.__iter__())
 
