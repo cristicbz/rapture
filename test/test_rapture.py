@@ -46,27 +46,37 @@ def pipe_fd(fd_from, fd_to):
 
 def is_nonzero_snap(snapshot, progress, code, errlog=''):
     return snapshot.status == jobs.STATUS_FAILED and \
-        snapshot.message.startswith(
-            rapture.JobRunner.ERR_NONZERO_EXIT % (code, errlog)) and \
+        snapshot.message == \
+        rapture.JobRunner.ERR_NONZERO_EXIT % (code, errlog) and \
         snapshot.progress == progress
 
 
 def is_signal_snap(snapshot, progress, sig, errlog=''):
     return snapshot.status == jobs.STATUS_FAILED and \
-        snapshot.message.startswith(
-            rapture.JobRunner.ERR_SIGNAL % (sig, errlog)) and \
+        snapshot.message == rapture.JobRunner.ERR_SIGNAL % (sig, errlog) and \
         snapshot.progress == progress
 
 
 def is_pending_snap(snapshot):
     return snapshot.status == jobs.STATUS_PENDING and \
-        snapshot.message == '' and \
-        snapshot.progress == ''
+        snapshot.message == '' and snapshot.progress == ''
 
 
 def is_success_snap(snapshot, progress):
     return snapshot.status == jobs.STATUS_DONE and \
         snapshot.message == '' and snapshot.progress == progress
+
+
+def is_heartbeat_timeout_snap(snapshot, progress='', errlog=''):
+    return snapshot.status == jobs.STATUS_FAILED and \
+        snapshot.message == rapture.JobRunner.ERR_HEARTBEAT % errlog and \
+        snapshot.progress == progress
+
+
+def is_overall_timeout_snap(snapshot, progress='', errlog=''):
+    return snapshot.status == jobs.STATUS_FAILED and \
+        snapshot.message == rapture.JobRunner.ERR_TIMEOUT % errlog and \
+        snapshot.progress == progress
 
 
 class RaptureHarness(object):
@@ -204,6 +214,50 @@ class CleanExitTests(SingleRaptureTestCase):
 
 
 class IntegrationTests(SingleRaptureTestCase):
+    def test_heartbeat_timeout(self):
+        self.start_redis()
+        self.start_rapture(
+            ['2@suc[heartbeat_secs=.1, auto_heartbeat=0]:jobs/success.sh',
+             '2@aut[heartbeat_secs=.1, auto_heartbeat=1]:jobs/success.sh'])
+
+        self.assert_job_list(
+            [('suc', {'args': ['.11', '1', 'a']}, is_heartbeat_timeout_snap,
+              dict(errlog='success-a-stderr-begin\n')),
+             ('suc', {'args': ['.12', '1', 'b']}, is_heartbeat_timeout_snap,
+              dict(errlog='success-b-stderr-begin\n')),
+             ('suc', {'args': ['.09', '1', 'c']}, is_success_snap,
+              dict(progress='success-c-1')),
+             ('aut', {'args': ['.11', '2', 'd']}, is_success_snap,
+              dict(progress='success-d-2')),
+             ('aut', {'args': ['.12', '2', 'e']}, is_success_snap,
+              dict(progress='success-e-2')),
+             ('aut', {'args': ['.09', '2', 'f']}, is_success_snap,
+              dict(progress='success-f-2'))],
+            max_wait=.6, interval=.1)
+
+        self.assertEqual(self.interrupt_rapture(), 'errcode-0')
+
+    def test_overall_timeout(self):
+        self.start_redis()
+        self.start_rapture(
+            ['2@suc[heartbeat_secs=.15, auto_heartbeat=0, '
+             'timeout_secs=.29]:jobs/success.sh',
+             '2@aut[heartbeat_secs=.1, auto_heartbeat=1, '
+             'timeout_secs=.29]:jobs/success.sh'])
+
+        self.assert_job_list(
+            [('suc', {'args': ['.1', '4', 'a']}, is_overall_timeout_snap,
+              dict(progress='success-a-2', errlog='success-a-stderr-begin\n')),
+             ('suc', {'args': ['.2', '2', 'b']}, is_heartbeat_timeout_snap,
+              dict(progress='', errlog='success-b-stderr-begin\n')),
+             ('aut', {'args': ['.2', '1', 'c']}, is_success_snap,
+              dict(progress='success-c-1')),
+             ('aut', {'args': ['.1', '4', 'd']}, is_overall_timeout_snap,
+              dict(progress='success-d-2', errlog='success-d-stderr-begin\n'))
+             ], max_wait=.6, interval=.1)
+
+        self.assertEqual(self.interrupt_rapture(), 'errcode-0')
+
     def test_exit_modes(self):
         self.start_redis()
         self.start_rapture(
@@ -216,37 +270,28 @@ class IntegrationTests(SingleRaptureTestCase):
         self.assert_job_list(
             [('qui', {}, is_success_snap, dict(progress='')),
              ('suc', {'args': ['0', 'a']}, is_success_snap, dict(progress='')),
-
              ('suc', {'args': ['1', 'b']}, is_success_snap,
               dict(progress='success-b-1',)),
-
              ('suc', {'args': ['2', 'c']}, is_success_snap,
               dict(progress='success-c-2',)),
-
              ('seg', {'args': ['0', 'd']}, is_signal_snap,
               dict(progress='', sig=signal.SIGSEGV,
-                   errlog='segfault-d-stderr-begin\nsegfault-d-stderr-end')),
-
+                   errlog='segfault-d-stderr-begin\nsegfault-d-stderr-end\n')),
              ('seg', {'args': ['1', 'e']}, is_signal_snap,
               dict(progress='segfault-e-1', sig=signal.SIGSEGV,
-                   errlog='segfault-e-stderr-begin\nsegfault-e-stderr-end')),
-
+                   errlog='segfault-e-stderr-begin\nsegfault-e-stderr-end\n')),
              ('trm', {'args': ['0', 'f']}, is_signal_snap,
               dict(progress='', sig=signal.SIGTERM,
-                   errlog='term-f-stderr-begin\nterm-f-stderr-end')),
-
+                   errlog='term-f-stderr-begin\nterm-f-stderr-end\n')),
              ('trm', {'args': ['1', 'g']}, is_signal_snap,
               dict(progress='term-g-1', sig=signal.SIGTERM,
-                   errlog='term-g-stderr-begin\nterm-g-stderr-end')),
-
+                   errlog='term-g-stderr-begin\nterm-g-stderr-end\n')),
              ('non', {'args': ['0', 'h']}, is_nonzero_snap,
               dict(progress='', code=42,
-                   errlog='nonzero-h-stderr-begin\nnonzero-h-stderr-end')),
-
+                   errlog='nonzero-h-stderr-begin\nnonzero-h-stderr-end\n')),
              ('non', {'args': ['1', 'i']}, is_nonzero_snap,
               dict(progress='nonzero-i-1', code=42,
-                   errlog='nonzero-i-stderr-begin\nnonzero-i-stderr-end')),
-
+                   errlog='nonzero-i-stderr-begin\nnonzero-i-stderr-end\n')),
              ('xxx', {}, is_pending_snap, {})],
             max_wait=1.5, interval=.1)
 
