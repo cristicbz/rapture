@@ -52,6 +52,7 @@ def is_nonzero_snap(snapshot, progress, code, errlog=''):
     ################################## WARNING THIS IS WRONG WRONG WRONG
     ################################## INTENTIONALLY BREAKING TESTS
     ################################## GRAB NEXT COMMIT
+    ################################## ADDITIONAL LINE TO TEST AGAIN
     return snapshot.status == jobs.STATUS_DONE and \
         snapshot.message == \
         rapture.JobRunner.ERR_NONZERO_EXIT % (code, errlog) and \
