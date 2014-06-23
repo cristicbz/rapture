@@ -32,6 +32,9 @@ REDIS_WORKING_DIR = 'redis'
 REDIS_CONF = 'redis.conf'
 RAPTURE_COMMAND = 'env python ../rapture.py'
 
+ENV_REDIS_COMMANDLINE = ''
+ENV_REDIS_ENDPOINT = ''
+
 
 def pipe_fd(fd_from, fd_to):
     def greenlet():
@@ -97,17 +100,29 @@ class RaptureHarness(object):
         assert self.redis_process is None
         assert self.redis_endpoint is None
         assert self.jobs is None
-        sockfile = binascii.hexlify(os.urandom(8)) + '.sock'
-        self.redis_process = Popen([REDIS_COMMAND, REDIS_CONF,
-                                    '--unixsocket ' + sockfile,
-                                    '--unixsocketperm 755'],
-                                   close_fds=True, preexec_fn=os.setsid,
-                                   cwd=REDIS_WORKING_DIR)
-        self.redis_endpoint = os.path.join(REDIS_WORKING_DIR, sockfile)
+        if not ENV_REDIS_COMMANDLINE:
+            sockfile = binascii.hexlify(os.urandom(8)) + '.sock'
+            redis_commandline = [REDIS_COMMAND, REDIS_CONF,
+                                 '--unixsocket ' + sockfile,
+                                 '--unixsocketperm 755']
+            self.redis_endpoint = 'unix-socket=' + \
+                os.path.join(REDIS_WORKING_DIR, sockfile)
+        else:
+            redis_commandline = shlex.split(ENV_REDIS_COMMANDLINE)
+            self.redis_endpoint = ENV_REDIS_ENDPOINT
+            assert(len(self.redis_endpoint.split(':')) >= 2)
+
+        self.redis_process = Popen(redis_commandline, close_fds=True,
+                                   preexec_fn=os.setsid, cwd=REDIS_WORKING_DIR)
         for n_attempt in xrange(4):
             try:
-                self.jobs = \
-                    jobs.connect_to_unix_socket_queue(self.redis_endpoint)
+                protocol, endpoint = self.redis_endpoint.split('=', 1)
+                if protocol == 'unix-socket':
+                    self.jobs = \
+                        jobs.connect_to_unix_socket_queue(endpoint)
+                else:
+                    host, port = endpoint.split(':', 1)
+                    self.jobs = jobs.connect_to_queue(host, port)
             except:
                 if n_attempt == 3:
                     raise
@@ -117,12 +132,11 @@ class RaptureHarness(object):
     def stop_redis(self):
         assert not self.rapture_running()
         self.jobs.disconnect()
-        os.killpg(self.redis_process.pid, signal.SIGINT)
-        self.redis_process.wait()
         try:
-            os.remove(self.redis_endpoint)
-        except OSError:
+            os.killpg(self.redis_process.pid, signal.SIGINT)
+        except:
             pass
+        self.redis_process.wait()
         self.redis_process, self.redis_endpoint, self.jobs = None, None, None
 
     def start_rapture(self, args):
@@ -130,7 +144,7 @@ class RaptureHarness(object):
         socket = self.redis_endpoint or '/inexistent/redis/endpoint'
 
         self.rapture_process = Popen(shlex.split(RAPTURE_COMMAND) +
-                                     ['--redis-unix-socket=' + socket] + args,
+                                     ['--redis-' + socket] + args,
                                      close_fds=True, preexec_fn=os.setsid,
                                      stderr=PIPE, stdout=PIPE)
 
@@ -299,5 +313,7 @@ class IntegrationTests(SingleRaptureTestCase):
 
 
 if __name__ == '__main__':
+    ENV_REDIS_COMMANDLINE = os.environ.get('REDIS_COMMANDLINE', None)
+    ENV_REDIS_ENDPOINT = os.environ.get('REDIS_ENDPOINT', None)
     os.chdir(os.path.dirname(os.path.realpath(sys.argv[0])))
     unittest.main()
