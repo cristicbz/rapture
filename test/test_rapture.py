@@ -49,7 +49,10 @@ def pipe_fd(fd_from, fd_to):
 
 
 def is_nonzero_snap(snapshot, progress, code, errlog=''):
-    return snapshot.status == jobs.STATUS_FAILED and \
+    ################################## WARNING THIS IS WRONG WRONG WRONG
+    ################################## INTENTIONALLY BREAKING TESTS
+    ################################## GRAB NEXT COMMIT
+    return snapshot.status == jobs.STATUS_DONE and \
         snapshot.message == \
         rapture.JobRunner.ERR_NONZERO_EXIT % (code, errlog) and \
         snapshot.progress == progress
