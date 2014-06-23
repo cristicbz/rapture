@@ -23,9 +23,9 @@ import reinferio.jobs as jobs
 
 DEFAULT_REDIS = 'localhost:6379'
 DEFAULT_QUEUE_OPTIONS = {
-    'heartbeat_secs': 60,
+    'heartbeat_secs': 60.0,
     'auto_heartbeat': False,
-    'timeout_secs': -1,
+    'timeout_secs': -1.0,
 }
 
 redis.connection.socket = gevent.socket
@@ -207,12 +207,12 @@ def validate_queue_options(options):
 
     timeout, heartbeat = options['timeout_secs'], options['heartbeat_secs']
 
-    if timeout < 1 and timeout != -1:
-        print('error: queue timeout must be greater than 1 or equal to -1')
+    if timeout < .1 and timeout != -1:
+        print('error: queue timeout must be greater than .1 or equal to -1')
         sys.exit(1)
 
-    if heartbeat < 1:
-        print('error: queue heartbeat lower than 1 second not allowed')
+    if heartbeat < .1:
+        print('error: queue heartbeat lower than .1 second not allowed')
         sys.exit(1)
 
 
