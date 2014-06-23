@@ -49,19 +49,21 @@ if __name__ == '__main__':
                   job_defs)
     id_to_args = {ji: job_defs[i][2] for (i, ji) in enumerate(job_ids)}
 
-    (progress, close) = job_queue.subscribe_to_jobs(job_ids)
-    gevent.signal(signal.SIGINT, close)
+    progress = job_queue.subscribe_to_jobs(job_ids)
+    gevent.signal(signal.SIGINT, progress.close)
 
     def subscriber():
-        for notification in progress():
+        for notification in progress:
             ji = notification.job_id
             blob = id_to_args[ji]
             if notification.status == jobs.STATUS_DONE:
                 print 'DONE "%s" (id: %s)' % (blob, ji)
             elif notification.status == jobs.STATUS_FAILED:
-                print 'FAIL "%s" (id: %s): \'%s\'' % (blob, ji, notification.message)
+                print 'FAIL "%s" (id: %s): \'%s\'' % \
+                    (blob, ji, notification.message)
             else:
-                print 'PROG "%s" (id: %s): \'%s\'' % (blob, ji, notification.message)
+                print 'PROG "%s" (id: %s): \'%s\'' % \
+                    (blob, ji, notification.message)
     subscriber_greenlet = gevent.spawn(subscriber)
     subscriber_greenlet.join()
 

@@ -47,6 +47,7 @@ end
 redis.call('hmset', data_key,
            '%(f_queue_id)s', queue_key,
            '%(f_args)s', args,
+           '%(f_message)s', '',
            '%(f_progress)s', '',
            '%(f_userdata)s', userdata,
            '%(f_time_updated)s', time_created,
@@ -182,25 +183,21 @@ class JobQueue(object):
 
     def subscribe_to_jobs(self, job_list):
         pubsub = self._redis.pubsub()
+        initials = []
         for job_id in job_list:
             job_id = ensure_job_id(job_id)
             pubsub.subscribe(id_to_data_key(job_id))
+            snapshot = self.fetch_snapshot(job_id)
+            initials.append(
+                ProgressNotifcation(
+                    job_id, snapshot.status,
+                    snapshot.message if snapshot.status == STATUS_FAILED else
+                    snapshot.progress))
 
-        def close():
-            pubsub.unsubscribe()
+            if snapshot.status in (STATUS_FAILED, STATUS_DONE):
+                pubsub.unsubscribe()
 
-        def generator():
-            for msg in pubsub.listen():
-                msgt, channel, data = msg['type'], msg['channel'], msg['data']
-                job_id = data_key_to_id(channel)
-                assert valid_job_id(job_id)
-                if msgt == 'message':
-                    status, message = data[:STATUS_LEN], data[STATUS_LEN:]
-                    if status == STATUS_DONE or status == STATUS_FAILED:
-                        pubsub.unsubscribe(channel)
-                    yield ProgressNotifcation(job_id, status, message)
-
-        return (generator, close)
+        return ProgressListener(pubsub, initials.__iter__())
 
     def resolve(self, job_id):
         job_id = ensure_job_id(job_id)
@@ -219,6 +216,40 @@ class JobQueue(object):
     @property
     def redis_connection(self):
         return self._redis
+
+
+class ProgressListener(object):
+    def __init__(self, pubsub, initials):
+        self._pubsub = pubsub
+        self._listen = pubsub.listen()
+        self._initials = initials
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.next()
+
+    def close(self):
+        self._pubsub.unsubscribe()
+
+    def next(self):
+        try:
+            return self._initials.next()
+        except StopIteration:
+            pass
+
+        msg = self._listen.next()
+        msgt, channel, data = msg['type'], msg['channel'], msg['data']
+        job_id = data_key_to_id(channel)
+        assert valid_job_id(job_id)
+        if msgt == 'message':
+            status, message = data[:STATUS_LEN], data[STATUS_LEN:]
+            if status == STATUS_DONE or status == STATUS_FAILED:
+                self._pubsub.unsubscribe(channel)
+            return ProgressNotifcation(job_id, status, message)
+        else:
+            return self.next()
 
 
 def make_new_job(job_type, args=None, userdata=None, timestamp='0.0'):
