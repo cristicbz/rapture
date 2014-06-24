@@ -214,6 +214,10 @@ class JobQueue(object):
         key = self._redis.brpoplpush(INPROGRESS_KEY, INPROGRESS_KEY)
         return data_key_to_id(key)
 
+    def debug_fetch_inprogress_list(self):
+        return self._redis.lrange(INPROGRESS_KEY, 0, -1)
+
+
     @property
     def redis_connection(self):
         return self._redis
