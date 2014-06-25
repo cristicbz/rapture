@@ -97,11 +97,13 @@ if rv == nil then
 elseif rv ~= '%(status_pending)s' then
     return 0
 end
-redis.call('hmset', data_key,
-           '%(f_time_updated)s', timestamp,
-           '%(f_progress)s', progress)
 if progress ~= '' then
-    redis.call('publish', data_key, '%(status_pending)s' .. progress)
+    redis.call('hmset', data_key,
+               '%(f_time_updated)s', timestamp,
+               '%(f_progress)s', progress)
+        redis.call('publish', data_key, '%(status_pending)s' .. progress)
+else
+    redis.call('hmset', data_key, '%(f_time_updated)s', timestamp)
 end
 return 1
 """ % SCRIPT_CONSTANTS
@@ -146,7 +148,7 @@ class JobQueue(object):
                                type_to_queue_key(job.job_type)],
                          args=[json.dumps(job.args),
                                job.userdata,
-                               job.time_created])
+                               str(job.time_created)])
         return job
 
     def pop(self, job_type, timeout=0):
@@ -166,20 +168,22 @@ class JobQueue(object):
                 FIELD_TIME_CREATED, FIELD_TIME_UPDATED)
         assert queue_id
         args = json.loads(args)
+        time_created = float(time_created)
+        time_updated = float(time_updated)
         job = JobSnapshot(job_id, queue_key_to_type(queue_id), status,
                           args, message or '', progress or '', userdata or '',
-                          time_created or '0.0', time_updated or '0.0')
+                          time_created or 0.0, time_updated or 0.0)
         assert_valid_job(job)
         return job
 
     def timestamp(self):
         # TODO(cristicbz): Synch and cache timestamps? Non-trivial of course.
-        return '.'.join(map(str, self._redis.time()))
+        return float('.'.join(map(str, self._redis.time())))
 
     def publish_progress(self, job_id, progress=''):
         job_id = ensure_job_id(job_id)
         self._script_progress(keys=[id_to_data_key(job_id)],
-                              args=[progress, self.timestamp()])
+                              args=[progress, str(self.timestamp())])
 
     def subscribe_to_jobs(self, job_list):
         pubsub = self._redis.pubsub()
@@ -203,20 +207,22 @@ class JobQueue(object):
     def resolve(self, job_id):
         job_id = ensure_job_id(job_id)
         self._script_resolve(keys=[id_to_data_key(job_id), INPROGRESS_KEY],
-                             args=[self.timestamp()])
+                             args=[str(self.timestamp())])
 
     def fail(self, job_id, message):
         job_id = ensure_job_id(job_id)
         self._script_fail(keys=[id_to_data_key(job_id), INPROGRESS_KEY],
-                          args=[message, self.timestamp()])
+                          args=[message, str(self.timestamp())])
 
     def monitor_inprogress(self):
         key = self._redis.brpoplpush(INPROGRESS_KEY, INPROGRESS_KEY)
         return data_key_to_id(key)
 
-    def debug_fetch_inprogress_list(self):
-        return self._redis.lrange(INPROGRESS_KEY, 0, -1)
+    def debug_fetch_inprogress_ids(self):
+        return map(data_key_to_id, self._redis.lrange(INPROGRESS_KEY, 0, -1))
 
+    def debug_fetch_all_ids(self):
+        return map(data_key_to_id, self._redis.keys(DATA_KEY_PREFIX + '*'))
 
     @property
     def redis_connection(self):
@@ -257,9 +263,9 @@ class ProgressListener(object):
             return self.next()
 
 
-def make_new_job(job_type, args=None, userdata=None, timestamp='0.0'):
+def make_new_job(job_type, args=None, userdata=None, timestamp=0.0):
     args = args or []
-    job = JobSnapshot(base64.b64encode(os.urandom(18)), job_type,
+    job = JobSnapshot(base64.urlsafe_b64encode(os.urandom(18)), job_type,
                       STATUS_PENDING, args, '', '', userdata or '',
                       timestamp, timestamp)
     assert_valid_job(job)
@@ -274,6 +280,12 @@ def assert_valid_job(job):
     assert valid_message(job.message)
     assert valid_progress(job.progress)
     assert valid_userdata(job.progress)
+    assert valid_time(job.time_created)
+    assert valid_time(job.time_updated)
+
+
+def valid_time(timestamp):
+    return type(timestamp) == float and timestamp > 0
 
 
 def valid_message(message):
