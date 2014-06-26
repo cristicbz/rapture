@@ -179,9 +179,7 @@ def monitor_greenlet(job_queue, check_interval, timeout):
             snapshot = job_queue.fetch_snapshot(job_id)
             update_secs_ago = job_queue.timestamp() - snapshot.time_updated
             if update_secs_ago > timeout:
-                job_queue.fail(job_id,
-                               jobs.make_error(jobs.ERROR_ORPHANED,
-                                               update_secs_ago))
+                job_queue.fail(job_id, jobs.make_error(jobs.ERROR_ORPHANED))
                 log.info('monitor: Reported orphaned job with ID %s.', job_id)
         except gevent.GreenletExit:
             break
