@@ -14,7 +14,7 @@ FIELD_QUEUE_KEY = 'queue_id'
 FIELD_STATUS = 'status'
 FIELD_ARGS = 'args'
 FIELD_PROGRESS = 'progress'
-FIELD_MESSAGE = 'message'
+FIELD_RUN_LOG = 'run_log'
 FIELD_USERDATA = 'userdata'
 FIELD_TIME_UPDATED = 'time_updated'
 FIELD_TIME_CREATED = 'time_created'
@@ -33,7 +33,7 @@ ERROR_TIMEOUT = 'error-timeout'
 
 
 SCRIPT_CONSTANTS = {'f_args': FIELD_ARGS,
-                    'f_message': FIELD_MESSAGE,
+                    'f_run_log': FIELD_RUN_LOG,
                     'f_progress': FIELD_PROGRESS,
                     'f_queue_id': FIELD_QUEUE_KEY,
                     'f_status': FIELD_STATUS,
@@ -55,7 +55,7 @@ end
 redis.call('hmset', data_key,
            '%(f_queue_id)s', queue_key,
            '%(f_args)s', args,
-           '%(f_message)s', '',
+           '%(f_run_log)s', '',
            '%(f_progress)s', '',
            '%(f_userdata)s', userdata,
            '%(f_time_updated)s', time_created,
@@ -81,7 +81,7 @@ return '%(status_done)s'
 
 SCRIPT_FAIL = """
 local data_key, inprogress_key = KEYS[1], KEYS[2]
-local message, timestamp = ARGV[1], ARGV[2]
+local run_log, timestamp = ARGV[1], ARGV[2]
 local rv = redis.call('hget', data_key, '%(f_status)s')
 if rv == nil then
     return {err='inexistent job'}
@@ -90,9 +90,9 @@ elseif rv ~= '%(status_pending)s' then
 end
 redis.call('hmset', data_key,
            '%(f_status)s', '%(status_failed)s',
-           '%(f_message)s', message,
+           '%(f_run_log)s', run_log,
            '%(f_time_updated)s', timestamp)
-redis.call('publish', data_key, '%(status_failed)s' .. message)
+redis.call('publish', data_key, '%(status_failed)s' .. run_log)
 redis.call('lrem', inprogress_key, 1, data_key)
 return '$(status_failed)s'
 """ % SCRIPT_CONSTANTS
@@ -120,10 +120,11 @@ return '$(status_pending)s'
 JobSnapshot = namedtuple(
     'JobSnapshot',
     ' '.join(('job_id', 'job_type',
-              FIELD_STATUS, FIELD_ARGS, FIELD_MESSAGE, FIELD_PROGRESS,
+              FIELD_STATUS, FIELD_ARGS, FIELD_RUN_LOG, FIELD_PROGRESS,
               FIELD_USERDATA, FIELD_TIME_CREATED, FIELD_TIME_UPDATED)))
 ProgressNotifcation = namedtuple(
-    'ProgressNotifcation', ' '.join(('job_id', FIELD_STATUS, FIELD_MESSAGE)))
+    'ProgressNotifcation', ' '.join(('job_id', FIELD_STATUS, FIELD_RUN_LOG,
+                                     FIELD_PROGRESS)))
 
 
 def connect_to_queue(host='localhost', port=6379, db=0, password=None):
@@ -167,19 +168,20 @@ class JobQueue(object):
 
     def fetch_snapshot(self, job_id):
         job_id = ensure_job_id(job_id)
-        (queue_id, status, args, message,
+        (queue_id, status, args, run_log,
          progress, userdata, time_created, time_updated) = \
             self._redis.hmget(
                 id_to_data_key(job_id),
                 FIELD_QUEUE_KEY, FIELD_STATUS, FIELD_ARGS,
-                FIELD_MESSAGE, FIELD_PROGRESS, FIELD_USERDATA,
+                FIELD_RUN_LOG, FIELD_PROGRESS, FIELD_USERDATA,
                 FIELD_TIME_CREATED, FIELD_TIME_UPDATED)
         assert queue_id
         args = json.loads(args)
         time_created = float(time_created)
         time_updated = float(time_updated)
         job = JobSnapshot(job_id, queue_key_to_type(queue_id), status,
-                          args, message or '', progress or '', userdata or '',
+                          args, run_log or '{}',
+                          progress or '', userdata or '',
                           time_created or 0.0, time_updated or 0.0)
         assert_valid_job(job)
         return job
@@ -206,8 +208,7 @@ class JobQueue(object):
             initials.append(
                 ProgressNotifcation(
                     job_id, snapshot.status,
-                    snapshot.message if snapshot.status == STATUS_FAILED else
-                    snapshot.progress))
+                    snapshot.run_log, snapshot.progress))
 
             if snapshot.status in (STATUS_FAILED, STATUS_DONE):
                 pubsub.unsubscribe(data_key)
@@ -220,11 +221,11 @@ class JobQueue(object):
             keys=[id_to_data_key(job_id), INPROGRESS_KEY],
             args=[str(self.timestamp())]) == STATUS_DONE
 
-    def fail(self, job_id, message):
+    def fail(self, job_id, run_log):
         job_id = ensure_job_id(job_id)
         return self._script_fail(
             keys=[id_to_data_key(job_id), INPROGRESS_KEY],
-            args=[message, str(self.timestamp())]) == STATUS_FAILED
+            args=[run_log, str(self.timestamp())]) == STATUS_FAILED
 
     def monitor_inprogress(self):
         key = self._redis.brpoplpush(INPROGRESS_KEY, INPROGRESS_KEY)
@@ -270,7 +271,9 @@ class ProgressListener(object):
             status, message = data[:STATUS_LENGTH], data[STATUS_LENGTH:]
             if status == STATUS_DONE or status == STATUS_FAILED:
                 self._pubsub.unsubscribe(channel)
-            return ProgressNotifcation(job_id, status, message)
+                return ProgressNotifcation(job_id, status, message, None)
+            else:
+                return ProgressNotifcation(job_id, status, None, message)
         else:
             return self.next()
 
@@ -310,7 +313,7 @@ def make_error(kind, returncode=None, stderr=None, command=None,
 def make_new_job(job_type, args=None, userdata=None, timestamp=0.0):
     args = args or []
     job = JobSnapshot(base64.urlsafe_b64encode(os.urandom(18)), job_type,
-                      STATUS_PENDING, args, '', '', userdata or '',
+                      STATUS_PENDING, args, '{}', '', userdata or '',
                       timestamp, timestamp)
     assert_valid_job(job)
     return job
@@ -321,7 +324,7 @@ def assert_valid_job(job):
     assert valid_job_type(job.job_type)
     assert valid_args(job.args)
     assert valid_status(job.status)
-    assert valid_message(job.message)
+    assert valid_run_log(job.run_log)
     assert valid_progress(job.progress)
     assert valid_userdata(job.progress)
     assert valid_time(job.time_created)
@@ -332,8 +335,12 @@ def valid_time(timestamp):
     return type(timestamp) == float and timestamp > 0
 
 
-def valid_message(message):
-    return isinstance(message, basestring)
+def valid_run_log(run_log):
+    try:
+        json.loads(run_log)
+    except ValueError:
+        return False
+    return True
 
 
 def valid_progress(progress):

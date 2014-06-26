@@ -66,13 +66,14 @@ if __name__ == '__main__':
             ji = notification.job_id
             blob = id_to_args[ji]
             if notification.status == jobs.STATUS_DONE:
-                print 'DONE "%s" (id: %s)' % (blob, ji)
+                print 'DONE "%s" (id: %s): prog=\'%s\' log=\'%s\'' % \
+                    (blob, ji, notification.progress, notification.run_log)
             elif notification.status == jobs.STATUS_FAILED:
-                print 'FAIL "%s" (id: %s): \'%s\'' % \
-                    (blob, ji, notification.message)
+                print 'FAIL "%s" (id: %s): prog=\'%s\' log=\'%s\'' % \
+                    (blob, ji, notification.progress, notification.run_log)
             else:
-                print 'PROG "%s" (id: %s): \'%s\'' % \
-                    (blob, ji, notification.message)
+                print 'PROG "%s" (id: %s): prog=\'%s\' log=\'%s\'' % \
+                    (blob, ji, notification.progress, notification.run_log)
     subscriber_greenlet = gevent.spawn(subscriber)
     subscriber_greenlet.join()
 
@@ -89,8 +90,8 @@ if __name__ == '__main__':
         print '\tType        : ' + snapshot.job_type
         print '\tStatus      : ' + snapshot.status
         print '\tArgs        : ' + str(snapshot.args)
-        print '\tMessage     : ' + snapshot.message
         print '\tProgress    : ' + snapshot.progress
         print '\tUserdata    : ' + snapshot.userdata
         print '\tTime created: ' + format_time(snapshot.time_created)
         print '\tTime updated: ' + format_time(snapshot.time_updated)
+        print '\tRun log     : ' + snapshot.run_log

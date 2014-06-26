@@ -38,7 +38,7 @@ log = logging.getLogger()
 class JobRunner(object):
     EVENT_SUCCESS, EVENT_FAILURE, EVENT_PROGRESS = 0, 1, 2
 
-    Event = namedtuple('Event', ['event_type', 'message'])
+    Event = namedtuple('Event', ['event_type', 'run_log'])
 
     def __init__(self, options, command, job_metadata):
         self._command_path = command
@@ -203,14 +203,14 @@ def runner_greenlet(job_queue, job_type, queue_options, command):
                 job_queue.resolve(job_id)
                 log.info('runner: Succeded %s/%s.', job_type, job_id)
             elif event.event_type == JobRunner.EVENT_FAILURE:
-                job_queue.fail(job_id, event.message)
+                job_queue.fail(job_id, event.run_log)
                 log.info('runner: Failed %s/%s: %s',
-                         job_type, job_id, event.message)
+                         job_type, job_id, event.run_log)
             else:
                 assert event.event_type == JobRunner.EVENT_PROGRESS
-                job_queue.publish_progress(job_id, event.message)
+                job_queue.publish_progress(job_id, event.run_log)
                 log.info('runner: Progress %s/%s: %s',
-                         job_type, job_id, event.message)
+                         job_type, job_id, event.run_log)
     log.info('runner: Greenlet for %s down.', job_type)
 
 

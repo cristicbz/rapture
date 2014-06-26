@@ -48,7 +48,7 @@ def pipe_fd(fd_from, fd_to):
     return gevent.spawn(greenlet)
 
 
-def match_error_message(msg, **kwargs):
+def match_run_log(msg, **kwargs):
     msg = json.loads(msg)
     for key, value in msg.iteritems():
         if key in kwargs and (kwargs[key] is None or kwargs[key] == msg[key]):
@@ -59,45 +59,45 @@ def match_error_message(msg, **kwargs):
 
 def is_nonzero_snap(snapshot, progress, code, errlog=''):
     return snapshot.status == jobs.STATUS_FAILED and \
-        match_error_message(snapshot.message,
-                            kind=jobs.ERROR_NONZERO_EXIT,
-                            returncode=code,
-                            stderr=errlog) and \
+        match_run_log(snapshot.run_log,
+                      kind=jobs.ERROR_NONZERO_EXIT,
+                      returncode=code,
+                      stderr=errlog) and \
         snapshot.progress == progress
 
 
 def is_signal_snap(snapshot, progress, sig, errlog=''):
     return snapshot.status == jobs.STATUS_FAILED and \
-        match_error_message(snapshot.message,
-                            kind=jobs.ERROR_SIGNAL,
-                            signal=sig,
-                            stderr=errlog) and \
+        match_run_log(snapshot.run_log,
+                      kind=jobs.ERROR_SIGNAL,
+                      signal=sig,
+                      stderr=errlog) and \
         snapshot.progress == progress
 
 
 def is_pending_snap(snapshot):
     return snapshot.status == jobs.STATUS_PENDING and \
-        snapshot.message == '' and snapshot.progress == ''
+        snapshot.run_log == '{}' and snapshot.progress == ''
 
 
 def is_success_snap(snapshot, progress):
     return snapshot.status == jobs.STATUS_DONE and \
-        snapshot.message == '' and snapshot.progress == progress
+        snapshot.run_log == '{}' and snapshot.progress == progress
 
 
 def is_heartbeat_timeout_snap(snapshot, progress='', errlog=''):
     return snapshot.status == jobs.STATUS_FAILED and \
-        match_error_message(snapshot.message,
-                            kind=jobs.ERROR_HEARTBEAT,
-                            stderr=errlog) and \
+        match_run_log(snapshot.run_log,
+                      kind=jobs.ERROR_HEARTBEAT,
+                      stderr=errlog) and \
         snapshot.progress == progress
 
 
 def is_overall_timeout_snap(snapshot, progress='', errlog=''):
     return snapshot.status == jobs.STATUS_FAILED and \
-        match_error_message(snapshot.message,
-                            kind=jobs.ERROR_TIMEOUT,
-                            stderr=errlog) and \
+        match_run_log(snapshot.run_log,
+                      kind=jobs.ERROR_TIMEOUT,
+                      stderr=errlog) and \
         snapshot.progress == progress
 
 
