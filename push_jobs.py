@@ -10,6 +10,7 @@ import gevent.socket
 import redis.connection
 
 from reinferio import jobs
+from datetime import datetime
 
 
 # Patch redis connections to use gevent sockets.
@@ -40,14 +41,22 @@ if __name__ == '__main__':
     if len(args.jobs) == 0:
         sys.exit(0)
 
-    job_defs = map(
-        lambda s: re.match(r'(\w+)(?:\[([^\]]+)\])?(?::(.*)$)?', s).groups(),
-        args.jobs)
-    job_ids = map(lambda j: job_queue.push(j[0],
-                                           userdata=j[1],
-                                           args=shlex.split(j[2])).job_id,
-                  job_defs)
-    id_to_args = {ji: job_defs[i][2] for (i, ji) in enumerate(job_ids)}
+    def job_from_def(job_def):
+        count, job_type, userdata, args = job_def
+        count = int(count or '1')
+        assert count >= 1
+        job_ids = []
+        for i_job in xrange(count):
+            job_ids.append(job_queue.push(job_type,
+                                          userdata=userdata,
+                                          args=shlex.split(
+                                              args + '-%d' % i_job)).job_id)
+        return job_ids
+
+    def_regex = re.compile(r'(?:(\d+)@)?(\w+)(?:\[([^\]]+)\])?(?::(.*)$)?')
+    job_defs = map(lambda s: def_regex.match(s).groups(), args.jobs)
+    job_ids = sum(map(job_from_def, job_defs), [])
+    id_to_args = {jid: job_queue.fetch_snapshot(jid).job_id for jid in job_ids}
 
     progress = job_queue.subscribe_to_jobs(job_ids)
     gevent.signal(signal.SIGINT, progress.close)
@@ -67,6 +76,9 @@ if __name__ == '__main__':
     subscriber_greenlet = gevent.spawn(subscriber)
     subscriber_greenlet.join()
 
+    def format_time(t):
+        return datetime.fromtimestamp(t).isoformat()
+
     print ''
     print ''
     print 'FINAL STATUS'
@@ -80,5 +92,5 @@ if __name__ == '__main__':
         print '\tMessage     : ' + snapshot.message
         print '\tProgress    : ' + snapshot.progress
         print '\tUserdata    : ' + snapshot.userdata
-        print '\tTime created: ' + snapshot.time_created
-        print '\tTime updated: ' + snapshot.time_updated
+        print '\tTime created: ' + format_time(snapshot.time_created)
+        print '\tTime updated: ' + format_time(snapshot.time_updated)
