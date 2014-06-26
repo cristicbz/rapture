@@ -19,10 +19,18 @@ FIELD_USERDATA = 'userdata'
 FIELD_TIME_UPDATED = 'time_updated'
 FIELD_TIME_CREATED = 'time_created'
 
-STATUS_LEN = 1
+STATUS_LENGTH = 1
 STATUS_PENDING = 'P'
 STATUS_FAILED = 'F'
 STATUS_DONE = 'D'
+
+ERROR_HEARTBEAT = 'error-heartbeat'
+ERROR_NONZERO_EXIT = 'error-nonzero-exit'
+ERROR_ORPHANED = 'error-orphaned'
+ERROR_START_PROCESS = 'error-start-process'
+ERROR_SIGNAL = 'error-signal'
+ERROR_TIMEOUT = 'error-timeout'
+
 
 SCRIPT_CONSTANTS = {'f_args': FIELD_ARGS,
                     'f_message': FIELD_MESSAGE,
@@ -62,13 +70,13 @@ local rv = redis.call('hget', data_key, '%(f_status)s')
 if rv == nil then
     return {err='inexistent job'}
 elseif rv ~= '%(status_pending)s' then
-    return 0
+    return rv
 end
 redis.call('hset', data_key, '%(f_status)s', '%(status_done)s')
 redis.call('publish', data_key, '%(status_done)s')
 redis.call('lrem', inprogress_key, 1, data_key)
 redis.call('hset', data_key, '%(f_time_updated)s', timestamp)
-return 1
+return '%(status_done)s'
 """ % SCRIPT_CONSTANTS
 
 SCRIPT_FAIL = """
@@ -78,7 +86,7 @@ local rv = redis.call('hget', data_key, '%(f_status)s')
 if rv == nil then
     return {err='inexistent job'}
 elseif rv ~= '%(status_pending)s' then
-    return 0
+    return rv
 end
 redis.call('hmset', data_key,
            '%(f_status)s', '%(status_failed)s',
@@ -86,7 +94,7 @@ redis.call('hmset', data_key,
            '%(f_time_updated)s', timestamp)
 redis.call('publish', data_key, '%(status_failed)s' .. message)
 redis.call('lrem', inprogress_key, 1, data_key)
-return 1
+return '$(status_failed)s'
 """ % SCRIPT_CONSTANTS
 
 SCRIPT_PROGRESS = """
@@ -95,17 +103,17 @@ local rv = redis.call('hget', data_key, '%(f_status)s')
 if rv == nil then
     return {err='inexistent job'}
 elseif rv ~= '%(status_pending)s' then
-    return 0
+    return rv
 end
 if progress ~= '' then
     redis.call('hmset', data_key,
                '%(f_time_updated)s', timestamp,
                '%(f_progress)s', progress)
-        redis.call('publish', data_key, '%(status_pending)s' .. progress)
+    redis.call('publish', data_key, '%(status_pending)s' .. progress)
 else
     redis.call('hmset', data_key, '%(f_time_updated)s', timestamp)
 end
-return 1
+return '$(status_pending)s'
 """ % SCRIPT_CONSTANTS
 
 
@@ -178,12 +186,14 @@ class JobQueue(object):
 
     def timestamp(self):
         # TODO(cristicbz): Synch and cache timestamps? Non-trivial of course.
-        return float('.'.join(map(str, self._redis.time())))
+        seconds, microseconds = map(float, self._redis.time())
+        return seconds + microseconds * 1e-6
 
     def publish_progress(self, job_id, progress=''):
         job_id = ensure_job_id(job_id)
-        self._script_progress(keys=[id_to_data_key(job_id)],
-                              args=[progress, str(self.timestamp())])
+        status = self._script_progress(keys=[id_to_data_key(job_id)],
+                                       args=[progress, str(self.timestamp())])
+        return status == STATUS_PENDING
 
     def subscribe_to_jobs(self, job_list):
         pubsub = self._redis.pubsub()
@@ -206,13 +216,15 @@ class JobQueue(object):
 
     def resolve(self, job_id):
         job_id = ensure_job_id(job_id)
-        self._script_resolve(keys=[id_to_data_key(job_id), INPROGRESS_KEY],
-                             args=[str(self.timestamp())])
+        return self._script_resolve(
+            keys=[id_to_data_key(job_id), INPROGRESS_KEY],
+            args=[str(self.timestamp())]) == STATUS_DONE
 
     def fail(self, job_id, message):
         job_id = ensure_job_id(job_id)
-        self._script_fail(keys=[id_to_data_key(job_id), INPROGRESS_KEY],
-                          args=[message, str(self.timestamp())])
+        return self._script_fail(
+            keys=[id_to_data_key(job_id), INPROGRESS_KEY],
+            args=[message, str(self.timestamp())]) == STATUS_FAILED
 
     def monitor_inprogress(self):
         key = self._redis.brpoplpush(INPROGRESS_KEY, INPROGRESS_KEY)
@@ -255,12 +267,44 @@ class ProgressListener(object):
         job_id = data_key_to_id(channel)
         assert valid_job_id(job_id)
         if msgt == 'message':
-            status, message = data[:STATUS_LEN], data[STATUS_LEN:]
+            status, message = data[:STATUS_LENGTH], data[STATUS_LENGTH:]
             if status == STATUS_DONE or status == STATUS_FAILED:
                 self._pubsub.unsubscribe(channel)
             return ProgressNotifcation(job_id, status, message)
         else:
             return self.next()
+
+
+def make_error(kind, returncode=None, stderr=None, command=None,
+               exception=None, signal=None):
+    all_args = locals()
+
+    def check_args(**expected_types):
+        nones = []
+        for key, value in all_args.iteritems():
+            if key in expected_types:
+                assert isinstance(value, expected_types[key]), \
+                    '%s must be set for %s' % (key, kind)
+            else:
+                assert value is None, '%s cannot be set for %s' % (key, kind)
+                nones.append(key)
+
+        for none in nones:
+            del all_args[none]
+    if kind == ERROR_HEARTBEAT or kind == ERROR_TIMEOUT:
+        check_args(kind=basestring, stderr=basestring)
+    elif kind == ERROR_NONZERO_EXIT:
+        check_args(kind=basestring, returncode=int, stderr=basestring)
+    elif kind == ERROR_ORPHANED:
+        check_args(kind=basestring)
+    elif kind == ERROR_START_PROCESS:
+        check_args(kind=basestring, command=basestring, exception=basestring)
+    elif kind == ERROR_SIGNAL:
+        check_args(kind=basestring, signal=int, stderr=basestring)
+    else:
+        assert False, 'Invalid error kind %s' % kind
+
+    return json.dumps(all_args)
 
 
 def make_new_job(job_type, args=None, userdata=None, timestamp=0.0):
