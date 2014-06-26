@@ -4,7 +4,9 @@ from __future__ import print_function, division
 import os
 import sys
 import imp
-os.chdir(os.path.dirname(os.path.realpath(__file__)))
+
+FILE_PATH = os.path.dirname(os.path.realpath(__file__))
+os.chdir(FILE_PATH)
 
 # Monkey patching thread is a workaround for this issue: http://bit.ly/1svAkvU
 import gevent.monkey
@@ -13,8 +15,11 @@ if 'threading' in sys.modules:
 gevent.monkey.patch_thread()
 
 # Import local rapture and jobs library.
-jobs = imp.load_source('jobs', '../reinferio/jobs/jobs.py')
-rapture = imp.load_source('rapture', '../rapture.py')
+sys.path.append(FILE_PATH)
+jobs = imp.load_source('jobs', os.path.join(FILE_PATH,
+                                            '../reinferio/jobs/jobs.py'))
+rapture = imp.load_source('rapture', os.path.join(FILE_PATH,
+                                                  '../rapture.py'))
 
 import binascii
 import pprint
