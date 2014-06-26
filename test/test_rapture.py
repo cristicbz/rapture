@@ -3,7 +3,8 @@
 from __future__ import print_function, division
 import os
 import sys
-os.chdir(os.path.dirname(os.path.realpath(sys.argv[0])))
+import imp
+os.chdir(os.path.dirname(os.path.realpath(__file__)))
 
 # Monkey patching thread is a workaround for this issue: http://bit.ly/1svAkvU
 import gevent.monkey
@@ -11,8 +12,9 @@ if 'threading' in sys.modules:
     del sys.modules['threading']
 gevent.monkey.patch_thread()
 
-# Enable reinferio and rapture imports.
-sys.path.append('../')
+# Import local rapture and jobs library.
+jobs = imp.load_source('jobs', '../reinferio/jobs/jobs.py')
+rapture = imp.load_source('rapture', '../rapture.py')
 
 import binascii
 import pprint
@@ -20,12 +22,10 @@ import shlex
 import signal
 import time
 import unittest
+import json
 
 from gevent.subprocess import Popen, PIPE
 from gevent import Timeout
-
-import reinferio.jobs as jobs
-import rapture
 
 
 REDIS_COMMAND = 'redis-server'
@@ -48,16 +48,30 @@ def pipe_fd(fd_from, fd_to):
     return gevent.spawn(greenlet)
 
 
+def match_error_message(msg, **kwargs):
+    msg = json.loads(msg)
+    for key, value in msg.iteritems():
+        if key in kwargs and (kwargs[key] is None or kwargs[key] == msg[key]):
+            continue
+        return False
+    return True
+
+
 def is_nonzero_snap(snapshot, progress, code, errlog=''):
     return snapshot.status == jobs.STATUS_FAILED and \
-        snapshot.message == \
-        rapture.JobRunner.ERR_NONZERO_EXIT % (code, errlog) and \
+        match_error_message(snapshot.message,
+                            kind=jobs.ERROR_NONZERO_EXIT,
+                            returncode=code,
+                            stderr=errlog) and \
         snapshot.progress == progress
 
 
 def is_signal_snap(snapshot, progress, sig, errlog=''):
     return snapshot.status == jobs.STATUS_FAILED and \
-        snapshot.message == rapture.JobRunner.ERR_SIGNAL % (sig, errlog) and \
+        match_error_message(snapshot.message,
+                            kind=jobs.ERROR_SIGNAL,
+                            signal=sig,
+                            stderr=errlog) and \
         snapshot.progress == progress
 
 
@@ -73,13 +87,17 @@ def is_success_snap(snapshot, progress):
 
 def is_heartbeat_timeout_snap(snapshot, progress='', errlog=''):
     return snapshot.status == jobs.STATUS_FAILED and \
-        snapshot.message == rapture.JobRunner.ERR_HEARTBEAT % errlog and \
+        match_error_message(snapshot.message,
+                            kind=jobs.ERROR_HEARTBEAT,
+                            stderr=errlog) and \
         snapshot.progress == progress
 
 
 def is_overall_timeout_snap(snapshot, progress='', errlog=''):
     return snapshot.status == jobs.STATUS_FAILED and \
-        snapshot.message == rapture.JobRunner.ERR_TIMEOUT % errlog and \
+        match_error_message(snapshot.message,
+                            kind=jobs.ERROR_TIMEOUT,
+                            stderr=errlog) and \
         snapshot.progress == progress
 
 

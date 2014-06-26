@@ -23,10 +23,13 @@ import reinferio.jobs as jobs
 
 DEFAULT_REDIS = 'localhost:6379'
 DEFAULT_QUEUE_OPTIONS = {
-    'heartbeat_secs': 60.0,
-    'auto_heartbeat': False,
-    'timeout_secs': -1.0,
+    'heartbeat_secs': 10.0,
+    'auto_heartbeat': True,
+    'timeout_secs': 24.0 * 3600.0
 }
+DEFAULT_ORPHANED_TIMEOUT = 20.0
+DEFAULT_MONITOR_INTERVAL = 5.0
+
 
 redis.connection.socket = gevent.socket
 log = logging.getLogger()
@@ -34,12 +37,6 @@ log = logging.getLogger()
 
 class JobRunner(object):
     EVENT_SUCCESS, EVENT_FAILURE, EVENT_PROGRESS = 0, 1, 2
-    ERR_HEARTBEAT = '[RAPTURE] Heartbeat interval exceeded; stderr:\n%s'
-    ERR_TIMEOUT = '[RAPTURE] Overall runtime limit exceeded; stderr:\n%s'
-    ERR_SIGNAL = '[RAPTURE] Killed by signal %d; stderr follows:\n%s'
-    ERR_NONZERO_EXIT = '[RAPTURE] Non-zero exit code %d; stderr follows:\n%s'
-    ERR_POPEN_FAIL = '[RAPTURE] Could not start subprocess %s with' \
-                     ' arguments %s. Reason: %s'
 
     Event = namedtuple('Event', ['event_type', 'message'])
 
@@ -128,7 +125,8 @@ class JobRunner(object):
         assert self._running and not self._done
         return JobRunner.Event(
             JobRunner.EVENT_FAILURE,
-            JobRunner.ERR_TIMEOUT % self._kill_and_grab_stderr())
+            jobs.make_error(jobs.ERROR_TIMEOUT,
+                            stderr=self._kill_and_grab_stderr()))
 
     def _event_progress(self, progress_line):
         assert self._running and not self._done
@@ -141,7 +139,8 @@ class JobRunner(object):
         else:
             return JobRunner.Event(
                 JobRunner.EVENT_FAILURE,
-                JobRunner.ERR_HEARTBEAT % self._kill_and_grab_stderr())
+                jobs.make_error(jobs.ERROR_HEARTBEAT,
+                                stderr=self._kill_and_grab_stderr()))
 
     def _event_subprocess_exit(self, stderr_log):
         error_code = self._subprocess.returncode
@@ -153,22 +152,44 @@ class JobRunner(object):
         elif error_code < 0:
             return JobRunner.Event(
                 JobRunner.EVENT_FAILURE,
-                JobRunner.ERR_SIGNAL % (-error_code, stderr_log))
+                jobs.make_error(jobs.ERROR_SIGNAL, signal=-error_code,
+                                stderr=stderr_log))
         else:
             return JobRunner.Event(
                 JobRunner.EVENT_FAILURE,
-                JobRunner.ERR_NONZERO_EXIT % (error_code, stderr_log))
+                jobs.make_error(jobs.ERROR_NONZERO_EXIT, returncode=error_code,
+                                stderr=stderr_log))
 
     def _event_popen_fail(self, os_error):
         assert not self._done
         self._done = True
         return JobRunner.Event(
-            JobRunner.EVENT_FAILURE, JobRunner.ERR_POPEN_FAIL %
-            (self._command_path, self._metadata.args, os_error))
+            JobRunner.EVENT_FAILURE,
+            jobs.make_error(jobs.ERROR_START_PROCESS,
+                            command=self._command_path,
+                            exception=str(os_error)))
 
 
-def worker(job_queue, job_type, queue_options, command):
-    log.info('worker: Greenlet for %s up.', job_type)
+def monitor_greenlet(job_queue, check_interval, timeout):
+    log.info('monitor: Greenlet up.')
+    while True:
+        try:
+            gevent.sleep(check_interval)
+            job_id = job_queue.monitor_inprogress()
+            snapshot = job_queue.fetch_snapshot(job_id)
+            update_secs_ago = job_queue.timestamp() - snapshot.time_updated
+            if update_secs_ago > timeout:
+                job_queue.fail(job_id,
+                               jobs.make_error(jobs.ERROR_ORPHANED,
+                                               update_secs_ago))
+                log.info('monitor: Reported orphaned job with ID %s.', job_id)
+        except gevent.GreenletExit:
+            break
+    log.info('monitor: Greenlet down.')
+
+
+def runner_greenlet(job_queue, job_type, queue_options, command):
+    log.info('runner: Greenlet for %s up.', job_type)
     while True:
         try:
             job_id = job_queue.pop(job_type)
@@ -178,20 +199,21 @@ def worker(job_queue, job_type, queue_options, command):
         job_metadata = job_queue.fetch_snapshot(job_id)
         runner = JobRunner(queue_options, command, job_metadata)
         job_queue.publish_progress(job_id)
-        log.info('worker: Started %s/%s.', job_type, job_id)
+        log.info('runner: Started %s/%s.', job_type, job_id)
         for event in runner.iterevents():
             if event.event_type == JobRunner.EVENT_SUCCESS:
                 job_queue.resolve(job_id)
-                log.info('worker: Succeded %s/%s.', job_type, job_id)
+                log.info('runner: Succeded %s/%s.', job_type, job_id)
             elif event.event_type == JobRunner.EVENT_FAILURE:
                 job_queue.fail(job_id, event.message)
-                log.info('worker: Failed %s/%s: %s',
+                log.info('runner: Failed %s/%s: %s',
                          job_type, job_id, event.message)
             else:
                 assert event.event_type == JobRunner.EVENT_PROGRESS
                 job_queue.publish_progress(job_id, event.message)
-                log.info('worker: Progress %s/%s: %s',
+                log.info('runner: Progress %s/%s: %s',
                          job_type, job_id, event.message)
+    log.info('runner: Greenlet for %s down.', job_type)
 
 
 def signal_handler(job_queue, greenlets):
@@ -310,6 +332,15 @@ if __name__ == '__main__':
          'default: %s' % DEFAULT_REDIS)
     _arg('--redis-unix-socket', metavar='PATH', type=str, default='',
          action='store', help='Redis endpoint as unix socket path.')
+    _arg('--monitor-interval', metavar='SECS', type=float,
+         default=DEFAULT_MONITOR_INTERVAL, help='The interval at which the '
+         'in-progress queue is monitored for orphaned jobs. (default=%s)' %
+         DEFAULT_MONITOR_INTERVAL)
+    _arg('--orphaned-timeout', metavar='SECS', type=float,
+         default=DEFAULT_ORPHANED_TIMEOUT, help='If an inprogress job has not '
+         'had a heartbeat for longer than this time, the rapture node running '
+         'it is assumed to be dead and job is reported to have failed. '
+         '(default=%s)' % DEFAULT_ORPHANED_TIMEOUT)
     _arg('mapping', metavar='N@JOBTYPE|OPTIONS|:COMMAND', type=str, nargs='+',
          help='Job specification - can be specified multiple times.\n'
          'For example \'4@parse[auto_heartbeat=yes]:/bin/parser\' '
@@ -333,12 +364,14 @@ if __name__ == '__main__':
         print('error: Could not connect to job queue: %s' % error)
         sys.exit(1)
 
-    worker_args = parse_mappings(job_queue, args.mapping)
-    workers = [gevent.spawn(worker, *argstuple) for argstuple in worker_args]
+    runner_args = parse_mappings(job_queue, args.mapping)
+    greenlets = [gevent.spawn(runner_greenlet, *argtuple)
+                 for argtuple in runner_args]
+    greenlets.append(gevent.spawn(monitor_greenlet, job_queue, 1, 2))
 
-    gevent.signal(signal.SIGINT, lambda: signal_handler(job_queue, workers))
+    gevent.signal(signal.SIGINT, lambda: signal_handler(job_queue, greenlets))
 
-    log.info('main: Spawned %d greenlets. Waiting on jobs...', len(workers))
-    gevent.joinall(workers)
+    log.info('main: Spawned %d greenlets. Waiting on jobs...', len(greenlets))
+    gevent.joinall(greenlets)
 
     log.info('main: Clean exit.')
