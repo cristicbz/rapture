@@ -366,8 +366,8 @@ if __name__ == '__main__':
     greenlets = [gevent.spawn(runner_greenlet, *argtuple)
                  for argtuple in runner_args]
     greenlets.append(gevent.spawn(monitor_greenlet, job_queue,
-                                  args['monitor_interval'],
-                                  args['orphaned_timeout']))
+                                  args.monitor_interval,
+                                  args.orphaned_timeout))
 
     gevent.signal(signal.SIGINT, lambda: signal_handler(job_queue, greenlets))
 
