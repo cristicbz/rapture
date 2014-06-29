@@ -16,10 +16,10 @@ gevent.monkey.patch_thread()
 
 # Import local rapture and jobs library.
 sys.path.append(os.path.join(FILE_PATH, '..'))
-jobs = imp.load_source('jobs', os.path.join(FILE_PATH,
-                                            '../reinferio/jobs/jobs.py'))
-rapture = imp.load_source('rapture', os.path.join(FILE_PATH,
-                                                  '../rapture.py'))
+jobs = imp.load_source('jobs',
+                       os.path.join(FILE_PATH, '../reinferio/jobs/jobs.py'))
+rapture = imp.load_source('rapture',
+                          os.path.join(FILE_PATH, '../rapture.py'))
 
 import binascii
 import pprint
