@@ -154,6 +154,7 @@ $(document).ready(function() {
 '''
 
 TEMPLATE_JOB_VIEW = r'''
+%import json
 <html>
 <head>
 <link rel='stylesheet' type='text/css'
@@ -173,11 +174,28 @@ href='//cdn.datatables.net/1.10.0/css/jquery.dataTables.css' />
     </tr>
 </thead>
 <tbody>
+    % errlog = None
     % for field in job._fields:
-    <tr><td>{{field}}</td><td><pre>{{job._asdict()[field]}}</pre></td></tr>
+    %     if field != 'run_log':
+              <tr>
+                  <td>{{field}}</td>
+                  <td><pre>{{job._asdict()[field]}}</pre></td>
+              </tr>
+    %     else:
+    %         run_log = json.loads(job._asdict()[field])
+    %         if 'stderr' in run_log:
+    %             errlog, run_log['stderr'] = run_log['stderr'], '<see below>'
+    %         end
+              <tr>
+                  <td>{{field}}</td>
+                  <td><pre>{{json.dumps(run_log)}}</pre></td>
+              </tr>
+    %     end
     % end
 </tbody>
 </table>
+<h2>Error log</h2>
+<p><pre>{{errlog or '<unavailable>'}}</pre></p>
 </body>
 <script>
 $(document).ready(function() {
