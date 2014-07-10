@@ -74,8 +74,12 @@ function renderId(id) {
     return '<a href="job/' + id + '">' + id + '</a>';
 }
 
-function renderTime(timestamp) {
-    return moment.unix(timestamp).format('HH:mm:ss / (DD MMM YY)');
+function renderTime(timestamp, type) {
+    if (type == 'sort') {
+        return timestamp;
+    } else {
+        return moment.unix(timestamp).format('HH:mm:ss / (DD MMM YY)');
+    }
 }
 
 function newDataTable(element, opts) {
