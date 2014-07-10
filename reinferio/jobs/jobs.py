@@ -352,7 +352,7 @@ def valid_job_type(job_type):
 
 
 def valid_args(args):
-    return (type(args) == list) and \
+    return isinstance(args, list) and \
         all([isinstance(arg, basestring) for arg in args])
 
 
