@@ -125,8 +125,8 @@ class JobRunner(object):
         assert self._running and not self._done
         return JobRunner.Event(
             JobRunner.EVENT_FAILURE,
-            jobs.make_error(jobs.ERROR_TIMEOUT,
-                            stderr=self._kill_and_grab_stderr()))
+            jobs.make_error_run_log(jobs.ERROR_TIMEOUT,
+                                    stderr=self._kill_and_grab_stderr()))
 
     def _event_progress(self, progress_line):
         assert self._running and not self._done
@@ -139,8 +139,8 @@ class JobRunner(object):
         else:
             return JobRunner.Event(
                 JobRunner.EVENT_FAILURE,
-                jobs.make_error(jobs.ERROR_HEARTBEAT,
-                                stderr=self._kill_and_grab_stderr()))
+                jobs.make_error_run_log(jobs.ERROR_HEARTBEAT,
+                                        stderr=self._kill_and_grab_stderr()))
 
     def _event_subprocess_exit(self, stderr_log):
         error_code = self._subprocess.returncode
@@ -148,26 +148,29 @@ class JobRunner(object):
 
         self._finalise()
         if error_code == 0:
-            return JobRunner.Event(JobRunner.EVENT_SUCCESS, None)
+            return JobRunner.Event(
+                JobRunner.EVENT_SUCCESS,
+                jobs.make_success_run_log(stderr=stderr_log))
         elif error_code < 0:
             return JobRunner.Event(
                 JobRunner.EVENT_FAILURE,
-                jobs.make_error(jobs.ERROR_SIGNAL, signal=-error_code,
-                                stderr=stderr_log))
+                jobs.make_error_run_log(jobs.ERROR_SIGNAL, signal=-error_code,
+                                        stderr=stderr_log))
         else:
             return JobRunner.Event(
                 JobRunner.EVENT_FAILURE,
-                jobs.make_error(jobs.ERROR_NONZERO_EXIT, returncode=error_code,
-                                stderr=stderr_log))
+                jobs.make_error_run_log(jobs.ERROR_NONZERO_EXIT,
+                                        returncode=error_code,
+                                        stderr=stderr_log))
 
     def _event_popen_fail(self, os_error):
         assert not self._done
         self._done = True
         return JobRunner.Event(
             JobRunner.EVENT_FAILURE,
-            jobs.make_error(jobs.ERROR_START_PROCESS,
-                            command=self._command_path,
-                            exception=str(os_error)))
+            jobs.make_error_run_log(jobs.ERROR_START_PROCESS,
+                                    command=self._command_path,
+                                    exception=str(os_error)))
 
 
 def monitor_greenlet(job_queue, check_interval, timeout):
@@ -179,7 +182,8 @@ def monitor_greenlet(job_queue, check_interval, timeout):
             snapshot = job_queue.fetch_snapshot(job_id)
             update_secs_ago = job_queue.timestamp() - snapshot.time_updated
             if update_secs_ago > timeout:
-                job_queue.fail(job_id, jobs.make_error(jobs.ERROR_ORPHANED))
+                job_queue.fail(job_id,
+                               jobs.make_error_run_log(jobs.ERROR_ORPHANED))
                 log.info('monitor: Reported orphaned job with ID %s.', job_id)
         except gevent.GreenletExit:
             break
@@ -200,7 +204,7 @@ def runner_greenlet(job_queue, job_type, queue_options, command):
         log.info('runner: Started %s/%s.', job_type, job_id)
         for event in runner.iterevents():
             if event.event_type == JobRunner.EVENT_SUCCESS:
-                job_queue.resolve(job_id)
+                job_queue.resolve(job_id, event.run_log)
                 log.info('runner: Succeded %s/%s.', job_type, job_id)
             elif event.event_type == JobRunner.EVENT_FAILURE:
                 job_queue.fail(job_id, event.run_log)

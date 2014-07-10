@@ -65,7 +65,7 @@ def match_run_log(msg, **kwargs):
 def is_nonzero_snap(snapshot, progress, code, errlog=''):
     return snapshot.status == jobs.STATUS_FAILED and \
         match_run_log(snapshot.run_log,
-                      kind=jobs.ERROR_NONZERO_EXIT,
+                      error=jobs.ERROR_NONZERO_EXIT,
                       returncode=code,
                       stderr=errlog) and \
         snapshot.progress == progress
@@ -74,7 +74,7 @@ def is_nonzero_snap(snapshot, progress, code, errlog=''):
 def is_signal_snap(snapshot, progress, sig, errlog=''):
     return snapshot.status == jobs.STATUS_FAILED and \
         match_run_log(snapshot.run_log,
-                      kind=jobs.ERROR_SIGNAL,
+                      error=jobs.ERROR_SIGNAL,
                       signal=sig,
                       stderr=errlog) and \
         snapshot.progress == progress
@@ -85,15 +85,16 @@ def is_pending_snap(snapshot):
         snapshot.run_log == '{}' and snapshot.progress == ''
 
 
-def is_success_snap(snapshot, progress):
+def is_success_snap(snapshot, progress, errlog):
     return snapshot.status == jobs.STATUS_DONE and \
-        snapshot.run_log == '{}' and snapshot.progress == progress
+        match_run_log(snapshot.run_log, stderr=errlog) and \
+        snapshot.progress == progress
 
 
 def is_heartbeat_timeout_snap(snapshot, progress='', errlog=''):
     return snapshot.status == jobs.STATUS_FAILED and \
         match_run_log(snapshot.run_log,
-                      kind=jobs.ERROR_HEARTBEAT,
+                      error=jobs.ERROR_HEARTBEAT,
                       stderr=errlog) and \
         snapshot.progress == progress
 
@@ -101,7 +102,7 @@ def is_heartbeat_timeout_snap(snapshot, progress='', errlog=''):
 def is_overall_timeout_snap(snapshot, progress='', errlog=''):
     return snapshot.status == jobs.STATUS_FAILED and \
         match_run_log(snapshot.run_log,
-                      kind=jobs.ERROR_TIMEOUT,
+                      error=jobs.ERROR_TIMEOUT,
                       stderr=errlog) and \
         snapshot.progress == progress
 
@@ -264,13 +265,17 @@ class IntegrationTests(SingleRaptureTestCase):
              ('suc', {'args': ['.12', '1', 'b']}, is_heartbeat_timeout_snap,
               dict(errlog='success-b-stderr-begin\n')),
              ('suc', {'args': ['.09', '1', 'c']}, is_success_snap,
-              dict(progress='success-c-1')),
+              dict(progress='success-c-1',
+                   errlog='success-c-stderr-begin\nsuccess-c-stderr-end\n')),
              ('aut', {'args': ['.11', '2', 'd']}, is_success_snap,
-              dict(progress='success-d-2')),
+              dict(progress='success-d-2',
+                   errlog='success-d-stderr-begin\nsuccess-d-stderr-end\n')),
              ('aut', {'args': ['.12', '2', 'e']}, is_success_snap,
-              dict(progress='success-e-2')),
+              dict(progress='success-e-2',
+                   errlog='success-e-stderr-begin\nsuccess-e-stderr-end\n')),
              ('aut', {'args': ['.09', '2', 'f']}, is_success_snap,
-              dict(progress='success-f-2'))],
+              dict(progress='success-f-2',
+                   errlog='success-f-stderr-begin\nsuccess-f-stderr-end\n'))],
             max_wait=1.5, interval=.1)
 
         self.assertEqual(self.interrupt_rapture(), 'errcode-0')
@@ -289,7 +294,8 @@ class IntegrationTests(SingleRaptureTestCase):
              ('suc', {'args': ['.2', '2', 'b']}, is_heartbeat_timeout_snap,
               dict(progress='', errlog='success-b-stderr-begin\n')),
              ('aut', {'args': ['.2', '1', 'c']}, is_success_snap,
-              dict(progress='success-c-1')),
+              dict(progress='success-c-1',
+                   errlog='success-c-stderr-begin\nsuccess-c-stderr-end\n')),
              ('aut', {'args': ['.1', '4', 'd']}, is_overall_timeout_snap,
               dict(progress='success-d-2', errlog='success-d-stderr-begin\n'))
              ], max_wait=1.5, interval=.1)
@@ -306,12 +312,16 @@ class IntegrationTests(SingleRaptureTestCase):
              'non:jobs/nonzero.sh .2'])
 
         self.assert_job_list(
-            [('qui', {}, is_success_snap, dict(progress='')),
-             ('suc', {'args': ['0', 'a']}, is_success_snap, dict(progress='')),
+            [('qui', {}, is_success_snap, dict(progress='', errlog='')),
+             ('suc', {'args': ['0', 'a']}, is_success_snap,
+              dict(progress='',
+                   errlog='success-a-stderr-begin\nsuccess-a-stderr-end\n')),
              ('suc', {'args': ['1', 'b']}, is_success_snap,
-              dict(progress='success-b-1',)),
+              dict(progress='success-b-1',
+                   errlog='success-b-stderr-begin\nsuccess-b-stderr-end\n')),
              ('suc', {'args': ['2', 'c']}, is_success_snap,
-              dict(progress='success-c-2',)),
+              dict(progress='success-c-2',
+                   errlog='success-c-stderr-begin\nsuccess-c-stderr-end\n')),
              ('seg', {'args': ['0', 'd']}, is_signal_snap,
               dict(progress='', sig=signal.SIGSEGV,
                    errlog='segfault-d-stderr-begin\nsegfault-d-stderr-end\n')),

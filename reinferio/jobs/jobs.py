@@ -65,17 +65,20 @@ return 1
 """ % SCRIPT_CONSTANTS
 
 SCRIPT_RESOLVE = """
-local data_key, inprogress_key, timestamp = KEYS[1], KEYS[2], ARGV[1]
+local data_key, inprogress_key = KEYS[1], KEYS[2]
+local run_log, timestamp = ARGV[1], ARGV[2]
 local rv = redis.call('hget', data_key, '%(f_status)s')
 if rv == nil then
     return {err='inexistent job'}
 elseif rv ~= '%(status_pending)s' then
     return rv
 end
-redis.call('hset', data_key, '%(f_status)s', '%(status_done)s')
-redis.call('publish', data_key, '%(status_done)s')
+redis.call('hmset', data_key,
+           '%(f_status)s', '%(status_done)s',
+           '%(f_run_log)s', run_log,
+           '%(f_time_updated)s', timestamp)
 redis.call('lrem', inprogress_key, 1, data_key)
-redis.call('hset', data_key, '%(f_time_updated)s', timestamp)
+redis.call('publish', data_key, '%(status_done)s')
 return '%(status_done)s'
 """ % SCRIPT_CONSTANTS
 
@@ -92,8 +95,8 @@ redis.call('hmset', data_key,
            '%(f_status)s', '%(status_failed)s',
            '%(f_run_log)s', run_log,
            '%(f_time_updated)s', timestamp)
-redis.call('publish', data_key, '%(status_failed)s' .. run_log)
 redis.call('lrem', inprogress_key, 1, data_key)
+redis.call('publish', data_key, '%(status_failed)s')
 return '$(status_failed)s'
 """ % SCRIPT_CONSTANTS
 
@@ -123,8 +126,7 @@ JobSnapshot = namedtuple(
               FIELD_STATUS, FIELD_ARGS, FIELD_RUN_LOG, FIELD_PROGRESS,
               FIELD_USERDATA, FIELD_TIME_CREATED, FIELD_TIME_UPDATED)))
 ProgressNotifcation = namedtuple(
-    'ProgressNotifcation', ' '.join(('job_id', FIELD_STATUS, FIELD_RUN_LOG,
-                                     FIELD_PROGRESS)))
+    'ProgressNotifcation', ' '.join(('job_id', FIELD_STATUS, FIELD_PROGRESS)))
 
 
 def connect_to_queue(host='localhost', port=6379, db=0, password=None):
@@ -205,26 +207,29 @@ class JobQueue(object):
             data_key = id_to_data_key(job_id)
             pubsub.subscribe(data_key)
             snapshot = self.fetch_snapshot(job_id)
-            initials.append(
-                ProgressNotifcation(
-                    job_id, snapshot.status,
-                    snapshot.run_log, snapshot.progress))
+            initials.append(ProgressNotifcation(
+                job_id,
+                snapshot.status,
+                snapshot.progress
+                if snapshot.status == STATUS_PENDING else None))
 
             if snapshot.status in (STATUS_FAILED, STATUS_DONE):
                 pubsub.unsubscribe(data_key)
 
         return ProgressListener(pubsub, initials.__iter__())
 
-    def resolve(self, job_id):
-        job_id = ensure_job_id(job_id)
+    def resolve(self, job_id, run_log=None):
+        run_log = run_log or '{}'
+        assert valid_run_log(run_log)
         return self._script_resolve(
-            keys=[id_to_data_key(job_id), INPROGRESS_KEY],
-            args=[str(self.timestamp())]) == STATUS_DONE
+            keys=[id_to_data_key(ensure_job_id(job_id)), INPROGRESS_KEY],
+            args=[run_log, str(self.timestamp())]) == STATUS_DONE
 
-    def fail(self, job_id, run_log):
-        job_id = ensure_job_id(job_id)
+    def fail(self, job_id, run_log=None):
+        run_log = run_log or '{}'
+        assert valid_run_log(run_log)
         return self._script_fail(
-            keys=[id_to_data_key(job_id), INPROGRESS_KEY],
+            keys=[id_to_data_key(ensure_job_id(job_id)), INPROGRESS_KEY],
             args=[run_log, str(self.timestamp())]) == STATUS_FAILED
 
     def monitor_inprogress(self):
@@ -271,15 +276,15 @@ class ProgressListener(object):
             status, message = data[:STATUS_LENGTH], data[STATUS_LENGTH:]
             if status == STATUS_DONE or status == STATUS_FAILED:
                 self._pubsub.unsubscribe(channel)
-                return ProgressNotifcation(job_id, status, message, None)
+                return ProgressNotifcation(job_id, status, None)
             else:
-                return ProgressNotifcation(job_id, status, None, message)
+                return ProgressNotifcation(job_id, status, message)
         else:
             return self.next()
 
 
-def make_error(kind, returncode=None, stderr=None, command=None,
-               exception=None, signal=None):
+def make_error_run_log(error, returncode=None, stderr=None, command=None,
+                       exception=None, signal=None):
     all_args = locals()
 
     def check_args(**expected_types):
@@ -287,27 +292,31 @@ def make_error(kind, returncode=None, stderr=None, command=None,
         for key, value in all_args.iteritems():
             if key in expected_types:
                 assert isinstance(value, expected_types[key]), \
-                    '%s must be set for %s' % (key, kind)
+                    '%s must be set for %s' % (key, error)
             else:
-                assert value is None, '%s cannot be set for %s' % (key, kind)
+                assert value is None, '%s cannot be set for %s' % (key, error)
                 nones.append(key)
 
         for none in nones:
             del all_args[none]
-    if kind == ERROR_HEARTBEAT or kind == ERROR_TIMEOUT:
-        check_args(kind=basestring, stderr=basestring)
-    elif kind == ERROR_NONZERO_EXIT:
-        check_args(kind=basestring, returncode=int, stderr=basestring)
-    elif kind == ERROR_ORPHANED:
-        check_args(kind=basestring)
-    elif kind == ERROR_START_PROCESS:
-        check_args(kind=basestring, command=basestring, exception=basestring)
-    elif kind == ERROR_SIGNAL:
-        check_args(kind=basestring, signal=int, stderr=basestring)
+    if error == ERROR_HEARTBEAT or error == ERROR_TIMEOUT:
+        check_args(error=basestring, stderr=basestring)
+    elif error == ERROR_NONZERO_EXIT:
+        check_args(error=basestring, returncode=int, stderr=basestring)
+    elif error == ERROR_ORPHANED:
+        check_args(error=basestring)
+    elif error == ERROR_START_PROCESS:
+        check_args(error=basestring, command=basestring, exception=basestring)
+    elif error == ERROR_SIGNAL:
+        check_args(error=basestring, signal=int, stderr=basestring)
     else:
-        assert False, 'Invalid error kind %s' % kind
+        assert False, 'Invalid error error %s' % error
 
     return json.dumps(all_args)
+
+
+def make_success_run_log(stderr):
+    return json.dumps(locals())
 
 
 def make_new_job(job_type, args=None, userdata=None, timestamp=0.0):

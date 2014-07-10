@@ -66,14 +66,14 @@ if __name__ == '__main__':
             ji = notification.job_id
             blob = id_to_args[ji]
             if notification.status == jobs.STATUS_DONE:
-                print 'DONE "%s" (id: %s): prog=\'%s\' log=\'%s\'' % \
-                    (blob, ji, notification.progress, notification.run_log)
+                print 'DONE "%s" (id: %s): prog=\'%s\'' % \
+                    (blob, ji, notification.progress)
             elif notification.status == jobs.STATUS_FAILED:
-                print 'FAIL "%s" (id: %s): prog=\'%s\' log=\'%s\'' % \
-                    (blob, ji, notification.progress, notification.run_log)
+                print 'FAIL "%s" (id: %s): prog=\'%s\'' % \
+                    (blob, ji, notification.progress)
             else:
-                print 'PROG "%s" (id: %s): prog=\'%s\' log=\'%s\'' % \
-                    (blob, ji, notification.progress, notification.run_log)
+                print 'PROG "%s" (id: %s): prog=\'%s\'' % \
+                    (blob, ji, notification.progress)
     subscriber_greenlet = gevent.spawn(subscriber)
     subscriber_greenlet.join()
 
