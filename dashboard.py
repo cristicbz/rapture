@@ -1,11 +1,14 @@
-#!env python
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import datetime
 import json
-from gevent import monkey
-monkey.patch_all()
+import logging
+
+from gevent import monkey; monkey.patch_all()
 from bottle import route, run, template
+
 from reinferio import jobs
+
 
 TEMPLATE_DASHBOARD = r'''
 <html>
@@ -238,7 +241,8 @@ def inprogress_jobs():
 def job_snapshot(job_id):
     try:
         job = job_queue.fetch_snapshot(job_id)
-    except:
+    except Exception as e:
+        logging.exception(e)
         return
 
     return template(TEMPLATE_JOB_VIEW, job=job)
