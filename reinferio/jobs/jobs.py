@@ -315,8 +315,17 @@ def make_error_run_log(error, returncode=None, stderr=None, command=None,
     return json.dumps(all_args)
 
 
+def escape_binary_str(s):
+    s = s.encode('string-escape')
+    s = s.replace('\\\\', '\\') \
+         .replace('\\\'', '\'') \
+         .replace('\\\"', '\"') \
+         .replace('\\n', '\n')
+    return s
+
+
 def make_success_run_log(stderr):
-    return json.dumps(locals())
+    return json.dumps({'stderr': escape_binary_str(stderr)})
 
 
 def make_new_job(job_type, args=None, userdata=None, timestamp=0.0):
