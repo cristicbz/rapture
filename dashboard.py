@@ -248,7 +248,6 @@ def job_snapshot(job_id):
     return template(TEMPLATE_JOB_VIEW, job=job)
 
 
-
 if __name__ == '__main__':
     job_queue = jobs.connect_to_queue()
     run(reloader=True, debug=True, server='gevent')
