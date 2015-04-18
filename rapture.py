@@ -50,6 +50,8 @@ class JobRunner(object):
         self._running = False
         self._done = False
         self._subprocess = None
+        self._stderr_greenlet = None
+        self._stderr_parts = []
         self._stdout_still_open = True
         self._time_started = None
 
@@ -80,7 +82,8 @@ class JobRunner(object):
                     self._stdout_still_open = False
                     return self.next_event()
             else:
-                stderr_log = self._subprocess.communicate()[1]
+                self._subprocess.communicate()
+                stderr_log = ''.join(self._stderr_parts)
                 return self._event_subprocess_exit(stderr_log)
         except Timeout, timeout:
             if timeout == global_timeout:
@@ -93,12 +96,22 @@ class JobRunner(object):
             heartbeat_timeout.cancel()
             global_timeout.cancel()
 
+    def _read_stderr_parts(self):
+        while True:
+            line = self._subprocess.stderr.readline()
+            if line:
+                self._stderr_parts.append(line)
+            else:
+                break
+        log.info("runner: Stderr greenlet done.")
+
     def _start_subprocess(self):
         assert not self._running and not self._done
         self._subprocess = gevent.subprocess.Popen(
             self._command_path + self._metadata.args,
             stdout=gevent.subprocess.PIPE, stderr=gevent.subprocess.PIPE,
             close_fds=True, preexec_fn=os.setsid)
+        self._stderr_greenlet = gevent.spawn(self._read_stderr_parts)
 
         if self._global_timeout_seconds != -1:
             self._timeout_at = time.time() + self._global_timeout_seconds
@@ -119,7 +132,8 @@ class JobRunner(object):
         # up hanging forever (or until the process terminates on its own).
         os.killpg(self._subprocess.pid, signal.SIGKILL)
         self._finalise()
-        return self._subprocess.communicate()[1]
+        self._subprocess.communicate()
+        return ''.join(self._stderr_parts)
 
     def _event_overall_timeout(self):
         assert self._running and not self._done
