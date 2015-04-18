@@ -1,4 +1,4 @@
-FROM ubuntu:13.10
+FROM ubuntu:14.04
 
 MAINTAINER Cristi Cobzarenco <cristi@reinfer.io>
 
@@ -9,8 +9,6 @@ RUN apt-get install -y redis-server
 RUN apt-get install -y python-dev
 RUN pip install gevent
 RUN pip install redis
-RUN mkdir -p /src
 
-VOLUME "/src"
-CMD python src/test/test_rapture.py
-
+ADD . /src
+RUN python /src/test/test_rapture.py
